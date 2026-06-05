@@ -1,0 +1,23 @@
+# ===== build folder =====
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# ===== compiled objects =====
+*.o
+*.obj
+*.d
+*.a
+*.so
+*.out
+
+# ===== system files =====
+.DS_Store
+Thumbs.db
+
+# ===== IDE =====
+.vscode/
+.idea/

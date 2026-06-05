@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/EchoNet.dir/src/main.cpp.o CMakeFiles/EchoNet.dir/src/logger.cpp.o -o EchoNet 
