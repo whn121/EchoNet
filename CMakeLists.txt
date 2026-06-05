@@ -8,6 +8,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(EchoNet
     src/main.cpp
     src/logger.cpp
+    src/threadpool/TaskQueue.cpp
+    src/threadpool/ThreadPool.cpp
+    src/Net/Socket.cpp
 )
 
 target_include_directories(EchoNet PRIVATE ${PROJECT_SOURCE_DIR}/include)
