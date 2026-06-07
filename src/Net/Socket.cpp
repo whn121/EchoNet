@@ -3,6 +3,7 @@
 
 MySocket::MySocket()
 {
+    fd_= -1;
 }
 
 MySocket::~MySocket()
@@ -89,9 +90,14 @@ int MySocket::Accept(sockaddr_in& addr)
     if(afd < 0)
     {
         ERROR (std::string("链接失败"));//不推出保证循环
+        return -1;
     }
     INFO("Client connected: " + std::string(inet_ntoa(addr.sin_addr)) 
     + ":" + std::to_string(ntohs(addr.sin_port)));
     //inet_ntoa把二进制转成字符串(能解析ip格式) ntohs(大端转小端)
     return afd;
+}
+int MySocket::getfd() const
+{
+    return fd_;
 }

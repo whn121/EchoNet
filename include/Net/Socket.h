@@ -20,4 +20,5 @@ public:
     void Bind(const sockaddr_in& addr);
     void Listen( const int& nums);
     int Accept(sockaddr_in& addr);
+    int getfd()const; //connection要用
 };

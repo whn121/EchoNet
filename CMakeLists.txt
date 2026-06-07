@@ -11,6 +11,9 @@ add_executable(EchoNet
     src/threadpool/TaskQueue.cpp
     src/threadpool/ThreadPool.cpp
     src/Net/Socket.cpp
+    src/Net/Buffer.cpp
+    src/Net/Connection.cpp
+    src/Net/Acceptor.cpp
 )
 
 target_include_directories(EchoNet PRIVATE ${PROJECT_SOURCE_DIR}/include)
