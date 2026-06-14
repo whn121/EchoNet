@@ -1,42 +1,44 @@
 #include "Net/Buffer.h"
 
 Buffer::Buffer() = default;
+
 Buffer::~Buffer()
 {
-    clean();
+    clean ();
 }
 
-void Buffer::bappend(const char* val, size_t len)
+void Buffer::append (const char* msg, size_t len)
 {
-    buffer.append(val, len);
+    buffer_.append(msg, len);
 }
 
-std::string Buffer::retrieveMessage()
+bool Buffer::hasMessage () const
 {
-    size_t finlen = buffer.find('\n'); //定义规则
-    if (finlen == std::string::npos) //没找到返回这个
+    size_t fin = buffer_.find('\n');
+    if (fin == std::string::npos)
     {
-        INFO(std::string("没有找到完整的消息"));
-        return "";
+        return false;
     }
-    else
-    {
-        std::string val = buffer.substr(0,finlen + 1);
-        buffer = buffer.substr(finlen + 1);
-        return val;
-    }
+    return true;
 }
 
-bool Buffer::hasMessage() const
+bool Buffer::getMessage (std::string buf)
 {
-    return buffer.find('\n') != std::string::npos; //没找到返回这个
+    size_t fin = buffer_.find('\n');
+    if (fin == std::string::npos)
+    return false;
+    buf = buffer_.substr(0, fin + 1);
+    buffer_.erase(0, fin + 1);
+    return true;
 }
 
-void Buffer::clean()
+void Buffer::clean ()
 {
-    buffer = "";
+    buffer_.clear();
+    buffer_.clear();
 }
-std::string Buffer::getbuffer()
+
+void Buffer::writeBuffer(const char* msg, size_t len)
 {
-    return buffer;
+    buffer_.append(msg, len);
 }

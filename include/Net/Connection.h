@@ -1,18 +1,29 @@
-#pragma one
+#pragma once
 #include "Net/Buffer.h"
+#include <unistd.h>
+#include <sys/socket.h> 
+#include "Reactor/Channel.h"
+#include <memory>
+#include "Reactor/EventLoop.h"
 
 class Connection
 {
 public:
-    Connection(int afd);
+    Connection(int afd, std::unique_ptr<Channel> cahnnel, EventLoop* loop);
     ~Connection();
+    Connection(const Connection&) = delete;
+    Connection& operator= (const Connection&) = delete;
 
 private:
     int afd_;
-    Buffer buffer_;
+    EventLoop* loop_;
+    Buffer inBuffer_;
+    Buffer outBuffer_;
+    std::unique_ptr<Channel> channel_;
 
 public:
-    bool read();
-    void write(const std::string& msg);
-    Buffer& getbuffer();
+    void read();
+    void write();
+    bool getMessage(std::string& mess);
+    Channel* getChannel();
 };

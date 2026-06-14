@@ -1,103 +1,127 @@
 #include "Net/Socket.h"
-#include "logger.h"
 
-MySocket::MySocket()
+Socket::Socket()
 {
-    fd_= -1;
+    fd_ = -1;
+    ip_ = "";
+    addr = {};
 }
 
-MySocket::~MySocket()
+Socket::~Socket()
 {
     if (fd_ > 0)
-    close(fd_);
+    close (fd_);
 }
-void MySocket::Socket(const char* ip, const char* protocol)
+
+bool Socket::socket_(const char* ip, const char* pro)
 {
-    //constexpr int ipv4 = PF_INET;//using 给我类型取别名constexpr给常量取别名(都是替换)
-    //constexpr int ipv6 = PF_INET6;
-    if (std::string(ip) == "ipv4") //不要比较指针,不要粗心
+    if (std::string (ip) == "ipv4")
     {
-        if(std::string(protocol) == "tcp")
+        if (std::string (pro) == "tcp")
         {
-            fd_ = socket(PF_INET, SOCK_STREAM, 0);
+            fd_ = socket (AF_INET, SOCK_STREAM, 0);
+            ip_ = "ipv4";
         }
-        else if (std::string(protocol) == "udp")
+        else if (std::string (pro) == "udp")
         {
-            fd_ = socket(PF_INET, SOCK_DGRAM, 0);
+            fd_ = socket (AF_INET, SOCK_DGRAM, 0);
+            ip_ = "ipv4";
         }
-        else
+        else 
         {
-            ERROR (std::string("请输入正确的protocol"));
-            exit (-1);
+            return false;
         }
     }
-    else if (std::string(ip) == "ipv6")
+    else if (std::string (ip) == "ipv6")
     {
-        if(std::string(protocol) == "tcp")
+        if (std::string (pro) == "tcp")
         {
-            fd_ = socket(PF_INET6, SOCK_STREAM, 0);
+            fd_ = socket (AF_INET6, SOCK_STREAM, 0);
+            ip_ = "ipv6";
         }
-        else if (std::string(protocol) == "udp")
+        else if (std::string (pro) == "udp")
         {
-            fd_ = socket(PF_INET6, SOCK_DGRAM, 0);
+            fd_ = socket (AF_INET6, SOCK_DGRAM, 0);
+            ip_ = "ipv6";
         }
-        else
+        else 
         {
-            ERROR (std::string("请输入正确的protocol"));
-            exit (-1);
+            return false;
         }
     }
     else
     {
-        ERROR (std::string("请输入正确的ip和protocol"));
-        exit (-1);
+        return false;
     }
-    if (fd_ < 0)
-    {
-        ERROR (std::string("创建失败"));
-        exit (-1);
-    }
-    INFO (std::string("创建成功"));
+    return fd_ > 0;
 }
 
-void MySocket::Bind(const sockaddr_in& addr)
+bool Socket::bind_(uint16_t sin_prot_, uint32_t s_addr_)
 {
-    auto addr_ = (const sockaddr*)&addr; // 统一类类型
-    int ib = bind(fd_, addr_, sizeof(addr));
-    if (ib < 0)
+    if (ip_ == "ipv4")
     {
-        ERROR (std::string("绑定失败"));
-        exit (-1);
+        addr.sin_family = AF_INET;
     }
-    INFO (std::string("绑定成功"));
+    else if (ip_ == "ipv6")
+    {
+        addr.sin_family = AF_INET6;
+    }
+    else
+    {
+        return false;
+    }
+    addr.sin_port = htons (sin_prot_);
+    addr.sin_addr.s_addr = htonl (s_addr_);
+    int lfb = bind (fd_, (const sockaddr*)&addr, sizeof(addr));
+    if (lfb < 0)
+    {
+        return false;
+    }
+    return true;
 }
 
-void MySocket::Listen(const int& nums = 128)
+bool Socket::listen_(int nums)
 {
-    int il = listen(fd_, nums);
-    if (il < 0)
+    int lfl = listen (fd_, nums);
+    if (lfl < 0)
     {
-        ERROR (std::string("监听失败"));
-        exit (-1);
+        return false;
     }
-    INFO (std::string("监听成功"));
+    return true;
 }
-
-int MySocket::Accept(sockaddr_in& addr)
+int Socket::accept_()
 {
-    socklen_t len = sizeof (addr);
-    int afd = accept(fd_, (sockaddr*)&addr, &len);//记住把有点诡异,遗留问题吧
-    if(afd < 0)
+    sockaddr_in aaddr = {};
+    socklen_t len = sizeof (aaddr);
+    int afd = accept(fd_, (sockaddr*)&aaddr, &len);
+    if (afd < 0)
     {
-        ERROR (std::string("链接失败"));//不推出保证循环
         return -1;
     }
-    INFO("Client connected: " + std::string(inet_ntoa(addr.sin_addr)) 
-    + ":" + std::to_string(ntohs(addr.sin_port)));
-    //inet_ntoa把二进制转成字符串(能解析ip格式) ntohs(大端转小端)
-    return afd;
+    else if (afd == 0)
+    {
+        return 0;
+    } 
+    else
+    {
+        return afd;
+    }
 }
-int MySocket::getfd() const
+
+void Socket::setReuseAddr(bool on)
+{
+    int sra = on ? 1 : 0;
+    setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &sra, sizeof(sra)); //端口复用,防止之前结束后不能立即重启的
+}
+
+void Socket::setNonBlocking(int fd)
+{
+
+    int flag = fcntl(fd, F_GETFL, 0);//获得状态标志
+    fcntl(fd, F_SETFL, flag | O_NONBLOCK);//设置非阻塞
+}
+
+int Socket::getFd() const
 {
     return fd_;
 }

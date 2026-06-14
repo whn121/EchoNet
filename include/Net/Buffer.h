@@ -1,19 +1,20 @@
-#pragma one
-#include "logger.h"
+#pragma once
+#include <string>
 
-class Buffer 
+class Buffer
 {
 public:
     Buffer();
     ~Buffer();
 
 private:
-    std::string buffer;
-
+    std::string buffer_;
+    
 public:
-    void bappend (const char* val, size_t len);
-    std::string retrieveMessage();  
-    bool hasMessage() const; 
+    void append(const char* msg, size_t len);
+    bool getMessage(std::string buf);
+    bool hasMessage()const;
     void clean();
-    std::string getbuffer();//connection用
+    void writeBuffer(const char* msg, size_t len);
+
 };
