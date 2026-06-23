@@ -1,9 +1,9 @@
+#pragma once
 #include <queue>
 #include <functional>
 #include <mutex>
 #include <condition_variable>
-
-using Task = std::function<void()>;
+#include "ThreadPool/Task.h"
 
 class TaskQueue
 {
@@ -18,7 +18,7 @@ private:
     std::condition_variable cv_;
 
 public:
-    void push_(Task wok);
+    void push_(Task work);
     Task pop_();
     void cvnotify_all();
     void setstop();

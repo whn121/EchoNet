@@ -1,6 +1,7 @@
-#include "ThreadPool/ThreadPool.h"
+#include "ThreadPool/WorkThreadPool.h"
+#include "Net/Connection.h"
 
-ThreadPool::ThreadPool(int num)
+WorkThreadPool::WorkThreadPool(int num)
 {
     nums_ = num;
     stop_ = false;
@@ -12,26 +13,31 @@ ThreadPool::ThreadPool(int num)
     }
 }
 
-ThreadPool::~ThreadPool()
+WorkThreadPool::~WorkThreadPool()
 {
     stop();
 }
 
-void ThreadPool::submit_(Task wok)
+void WorkThreadPool::submit_(Task work)
 {
-    taskqueue_.push_(move(wok));
+    taskqueue_.push_(work);
 }
 
-void ThreadPool::worker_()
+void WorkThreadPool::worker_()
 {
     while (!stop_)
     {
         Task task = taskqueue_.pop_();
-        if (task)task();
+        auto conn = task.conn_;
+        if (conn)
+        {
+            HttpResponse reqs = conn -> handle(task.req_);
+            conn -> setResponse (reqs);
+        }
     }
 }
 
-void ThreadPool::stop()
+void WorkThreadPool::stop()
 {
     stop_ = true;
     taskqueue_.setstop();

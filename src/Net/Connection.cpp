@@ -1,75 +1,154 @@
 #include "Net/Connection.h"
 #include "Logger/logger.h"
 
-Connection::Connection(int afd, std::unique_ptr<Channel> channel, EventLoop* loop) : afd_ (afd), loop_ (loop)
-{
-    channel_ = move(channel);
-    channel_->setEvent(EPOLLIN);
-    channel_->setreadCallBack ([this]{this->read();});//因为有默认this参数所以不匹配,要用lambda表达式
-    channel_->setwriteCallBack([this]{this->write();});
-}
+Connection::Connection(int afd, std::unique_ptr<Channel> channel, EventLoop* loop)
+    : afd_(afd), loop_(loop), channel_(std::move(channel))
+{}
 
 Connection::~Connection()
 {
-    loop_ -> removeChannel(channel_.get());
     if (afd_ > 0)
     close(afd_);
 }
 
 void Connection::read()
 {
-    INFO("进入read");
     char buf[1024] = {};
     int n = recv(afd_, buf, sizeof(buf), 0);
-    if (n == 0)
+    if (n <= 0)
     {
-        // 对端关闭
-        loop_->removeChannel(channel_.get());
-        close(afd_);
-        afd_ = -1;
+        if (closeCallBack_)
+        closeCallBack_(afd_);
         return;
     }
-    if (n < 0)
+
+    inBuffer_.bufferAppend (buf, n);
+
+    while(true)
     {
-        if (errno == EAGAIN || errno == EINTR)
+        bool ifok = false;
+        size_t n = httpcontext_.parse (inBuffer_.peek(), inBuffer_.getreadable(), httprequest_, ifok);
+        if (n == 0) 
+        {
+            break; // 数据不够，等待更多数据
+        }
+        inBuffer_.goReadPtr (n);
+        if (ifok)
+        {
+            Task task;
+            task.conn_ = move (shared_from_this());
+            task.req_ = httprequest_;
+            if (worksumbitcallback_) worksumbitcallback_ (task);
+            httprequest_ = HttpRequest();
+        }
+    }
+}
+
+void Connection::write ()
+{
+    while (outBuffer_.getreadable() > 0)
+    {
+        size_t n = send (afd_, outBuffer_.peek(), outBuffer_.getreadable(), 0);
+        if (n == 0)
+        {
+            if (closeCallBack_) closeCallBack_(afd_);
             return;
-
-        // 错误关闭
-        loop_->removeChannel(channel_.get());
-        close(afd_);
-        afd_ = -1;
-        return;
+        }
+        if (n > 0)
+        {
+            outBuffer_.goReadPtr(n);
+        }
+        else if (n < 0)
+        {
+            if (errno == EAGAIN || errno == EINTR)
+            break;                // 发不出去，等下次
+            if (closeCallBack_) closeCallBack_(afd_);
+            return ;
+        }
     }
 
-    inBuffer_.append(buf, n);
-
-    INFO("读到了");
-}
-
-void Connection::write()
-{
-
-    char var[1024] = {};
-    if (inBuffer_.getMessage(std::string(var)))
+    if (outBuffer_.getreadable() == 0)
     {
-        int n = std::string (var).size();
-        outBuffer_.append(var, n);
-        send(afd_, var, n, 0);//.data()返回vector和string底层指针.get()返回智能指针的
+        loop_->updateChannelEvent(channel_.get(), EPOLLIN);
     }
 }
 
-bool Connection::getMessage (std::string& mess)
+
+void Connection::setResponse(const HttpResponse& httpresponse)
 {
-    std::string buf;
-    if (outBuffer_.getMessage(buf))
+    INFO("正在将回应提压入输出缓冲区");
+    std::string version;
+    switch (httpresponse.version_)
     {
-        mess = move(buf);
-        return true;
+    case Version::HTTP10:
+    version = "HTTP/1.0";//必须带/符合格式
+    break;
+    case Version::HTTP11:
+    version = "HTTP/1.1";
+    break;
+    default:
+    version = "UNKNOWN";
+    break;
     }
-    return false;
+    std::string buf = "";
+    buf += version + " " + std::to_string (httpresponse.status_code_) + " " + 
+    httpresponse.status_msg_ + "\r\n";
+    for (auto it : httpresponse.header_)
+    {
+        buf += it.first + ":" + it.second + "\r\n";
+    }
+    buf += "\r\n" + httpresponse.body_;
+
+    outBuffer_.bufferAppend(buf.data(), buf.size());
+
+    INFO("将数据压入输出缓冲区");
+
+    // 让 epoll 同时监听这个 fd 的可读和可写事件
+    loop_ -> runInLoop ([this]
+    {loop_->updateChannelEvent(channel_.get(), EPOLLIN | EPOLLOUT);});
+
 }
 
 Channel* Connection::getChannel()
 {
     return channel_.get();
+}
+
+void Connection::setcloseCallback(std::function<void(int)> close)
+{
+    closeCallBack_ = close;
+} 
+
+void Connection::myClose()
+{
+    closeCallBack_(afd_);
+}
+
+
+void Connection::init()
+{
+    auto self = shared_from_this();
+
+    channel_->setreadCallBack([self] {
+        self->read();
+    });
+
+    channel_->setwriteCallBack([self] {
+        self->write();
+    });
+
+    channel_->setcloseCallBack([self] {
+        self->myClose();
+    });
+}
+
+void Connection::setCallBack (std::function<void(Task)> callback)
+{
+    worksumbitcallback_ = callback;
+}
+
+HttpResponse Connection::handle (HttpRequest req)
+{
+    HttpResponse reqs = httpservice_.handle (req);
+    return reqs;
 }

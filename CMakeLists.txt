@@ -11,10 +11,14 @@ add_executable(EchoNet
     src/Net/Connection.cpp
     src/Net/Buffer.cpp
     src/ThreadPool/TaskQueue.cpp 
-    src/ThreadPool/ThreadPool.cpp 
+    src/ThreadPool/WorkThreadPool.cpp 
+    src/ThreadPool/IoThreadPool.cpp
     src/Reactor/Channel.cpp 
     src/Reactor/EventLoop.cpp 
     src/Reactor/Acceptor.cpp 
+    src/HTTP/HttpContext.cpp 
+    src/HTTP/HttpService.cpp
+    src/Server/Server.cpp
 )
 
 target_include_directories(EchoNet PRIVATE ${PROJECT_SOURCE_DIR}/include)

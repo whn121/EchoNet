@@ -13,16 +13,16 @@ Socket::~Socket()
     close (fd_);
 }
 
-bool Socket::socket_(const char* ip, const char* pro)
+bool Socket::m_init(IP ip, Proto proto)
 {
-    if (std::string (ip) == "ipv4")
+    if (ip == IP::ipv4)
     {
-        if (std::string (pro) == "tcp")
+        if (proto == Proto::tcp)
         {
             fd_ = socket (AF_INET, SOCK_STREAM, 0);
             ip_ = "ipv4";
         }
-        else if (std::string (pro) == "udp")
+        else if (proto == Proto::udp)
         {
             fd_ = socket (AF_INET, SOCK_DGRAM, 0);
             ip_ = "ipv4";
@@ -32,14 +32,14 @@ bool Socket::socket_(const char* ip, const char* pro)
             return false;
         }
     }
-    else if (std::string (ip) == "ipv6")
+    else if (ip == IP::ipv6)
     {
-        if (std::string (pro) == "tcp")
+        if (proto == Proto::tcp)
         {
             fd_ = socket (AF_INET6, SOCK_STREAM, 0);
             ip_ = "ipv6";
         }
-        else if (std::string (pro) == "udp")
+        else if (proto == Proto::udp)
         {
             fd_ = socket (AF_INET6, SOCK_DGRAM, 0);
             ip_ = "ipv6";
@@ -56,7 +56,7 @@ bool Socket::socket_(const char* ip, const char* pro)
     return fd_ > 0;
 }
 
-bool Socket::bind_(uint16_t sin_prot_, uint32_t s_addr_)
+bool Socket::m_bind(uint16_t sin_prot_, uint32_t s_addr_)
 {
     if (ip_ == "ipv4")
     {
@@ -80,7 +80,7 @@ bool Socket::bind_(uint16_t sin_prot_, uint32_t s_addr_)
     return true;
 }
 
-bool Socket::listen_(int nums)
+bool Socket::m_listen(int nums)
 {
     int lfl = listen (fd_, nums);
     if (lfl < 0)
@@ -89,7 +89,7 @@ bool Socket::listen_(int nums)
     }
     return true;
 }
-int Socket::accept_()
+int Socket::m_accept()
 {
     sockaddr_in aaddr = {};
     socklen_t len = sizeof (aaddr);
@@ -114,11 +114,11 @@ void Socket::setReuseAddr(bool on)
     setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &sra, sizeof(sra)); //端口复用,防止之前结束后不能立即重启的
 }
 
-void Socket::setNonBlocking(int fd)
+void Socket::setNonBlocking()
 {
 
-    int flag = fcntl(fd, F_GETFL, 0);//获得状态标志
-    fcntl(fd, F_SETFL, flag | O_NONBLOCK);//设置非阻塞
+    int flag = fcntl(fd_, F_GETFL, 0);//获得状态标志
+    fcntl(fd_, F_SETFL, flag | O_NONBLOCK);//设置非阻塞
 }
 
 int Socket::getFd() const

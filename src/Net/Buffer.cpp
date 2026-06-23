@@ -1,44 +1,69 @@
 #include "Net/Buffer.h"
 
-Buffer::Buffer() = default;
-
-Buffer::~Buffer()
+Buffer::Buffer() : read_ptr_ (0), write_ptr_ (0)
 {
-    clean ();
+    setSize (4096);
 }
 
-void Buffer::append (const char* msg, size_t len)
+Buffer::~Buffer() = default;
+
+void Buffer::bufferAppend (const char* msg, size_t len)
 {
-    buffer_.append(msg, len);
+    enableWrite(len);
+    memcpy(buffer_.data() + write_ptr_, msg, len);
+    write_ptr_ += len;
 }
 
-bool Buffer::hasMessage () const
+void Buffer::setSize (size_t size)
 {
-    size_t fin = buffer_.find('\n');
-    if (fin == std::string::npos)
+    buffer_.resize (size);
+}
+
+size_t Buffer::getreadptr () const
+{
+    return read_ptr_;
+}
+
+size_t Buffer::getwriteptr () const
+{
+    return write_ptr_;
+}
+
+const char *Buffer::peek()
+{
+    return buffer_.data() + read_ptr_;
+}
+
+void Buffer::enableWrite(size_t len)
+{
+    size_t writeabble = buffer_.size() - write_ptr_;
+    size_t readable = write_ptr_ - read_ptr_;
+    if (writeabble < len)
     {
-        return false;
+        if (writeabble + read_ptr_ >= len)
+        {
+            memmove(buffer_.data(), buffer_.data() + read_ptr_, readable);
+            read_ptr_ = 0;
+            write_ptr_ = readable;
+        }
+        while (buffer_.size() - write_ptr_ < len)
+        {
+            setSize (buffer_.size() + 4096);
+        }
     }
-    return true;
 }
 
-bool Buffer::getMessage (std::string buf)
+size_t Buffer::getreadable () const
 {
-    size_t fin = buffer_.find('\n');
-    if (fin == std::string::npos)
-    return false;
-    buf = buffer_.substr(0, fin + 1);
-    buffer_.erase(0, fin + 1);
-    return true;
+    return write_ptr_ - read_ptr_;
 }
 
-void Buffer::clean ()
+void Buffer::goReadPtr (size_t len)
 {
-    buffer_.clear();
-    buffer_.clear();
+    read_ptr_ += len;
 }
 
-void Buffer::writeBuffer(const char* msg, size_t len)
+void Buffer::goWritePtr (size_t len)
 {
-    buffer_.append(msg, len);
+    write_ptr_ += len;
 }
