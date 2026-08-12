@@ -1,36 +1,23 @@
 #include "ThreadPool/TaskQueue.h"
 
-TaskQueue::TaskQueue()
-{
-    stop_ = false;
+void TaskQueue::push(Task task) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    queue_.push(std::move(task));
+    cv_.notify_one();   // 唤醒一个等待的线程
 }
 
-TaskQueue::~TaskQueue() = default;
-
-void TaskQueue::push_ (Task work)
-{
-    std::unique_lock <std::mutex> lock(mtx_);
-    taskqueue_.emplace (work);//传的时候也是拷贝
-    cv_.notify_one();
-}
-
-Task TaskQueue::pop_()
-{
-    std::unique_lock <std::mutex> lock(mtx_);
-    cv_.wait(lock, [this]{return stop_ || !taskqueue_.empty();});//线程池推出问题
-    if (stop_ && taskqueue_.empty())
-    return {}; // 线程推出工作;
-    Task task = taskqueue_.front();//front返回的引用不是临时变量
-    taskqueue_.pop();
+Task TaskQueue::pop() {
+    std::unique_lock<std::mutex> lock(mtx_);
+    // 等待条件：队列非空或已停止
+    cv_.wait(lock, [this] { return stop_ || !queue_.empty(); });
+    if (stop_ && queue_.empty()) return {};  // 停止且队列空返回空Task
+    Task task = std::move(queue_.front());
+    queue_.pop();
     return task;
 }
 
-void TaskQueue::cvnotify_all()
-{
-    cv_.notify_all();
-}
-
-void TaskQueue::setstop()
-{
+void TaskQueue::stop() {
+    std::lock_guard<std::mutex> lock(mtx_);
     stop_ = true;
+    cv_.notify_all();  // 唤醒所有线程以便退出
 }

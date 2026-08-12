@@ -1,10 +1,10 @@
 #pragma once
 #include <memory>
-#include "HTTP/HttpContext.h"  
+#include <any>
 
-class Connection;  // 前向声明
-
+class Connection;
+// 任务结构体，在工作线程池中传递
 struct Task {
-    std::shared_ptr<Connection> conn_;
-    HttpRequest req_;
+    std::shared_ptr<Connection> conn_;   // 保证Connection存活
+    std::any message_;                   // 解析后的请求（如HttpRequest）
 };

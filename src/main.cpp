@@ -1,11 +1,20 @@
-#include "Net/Socket.h"
+#include "Common/Config.h"
 #include "Logger/logger.h"
-#include "Net/Connection.h"
-#include <memory>
 #include "Server/Server.h"
 
-int main ()
+int main (int argc, char* argv[])
 {
+    Config::instance ().parseArgs(argc, argv);
+
     Server server;
-    server.start ();
+    if (!server.start ())
+    {
+        INFO ("服务器没启动,自己找差距");
+        return 1;
+    }
+
+    server.stop ();
+    INFO ("服务器安全退出");
+    return 0;
+
 }

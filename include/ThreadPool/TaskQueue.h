@@ -1,26 +1,18 @@
 #pragma once
 #include <queue>
-#include <functional>
 #include <mutex>
 #include <condition_variable>
-#include "ThreadPool/Task.h"
+#include "Task.h"
 
-class TaskQueue
-{
+// 线程安全的任务队列（阻塞队列）
+class TaskQueue {
 public:
-    TaskQueue();
-    ~TaskQueue();
-
+    void push(Task task);
+    Task pop();                 // 阻塞直到有任务或停止
+    void stop();                // 唤醒所有等待并停止
 private:
-    bool stop_; // 要知道线程池是否停止要不没法启动全部线程条件变量不满足
-    std::queue<Task> taskqueue_; 
+    std::queue<Task> queue_;
     std::mutex mtx_;
     std::condition_variable cv_;
-
-public:
-    void push_(Task work);
-    Task pop_();
-    void cvnotify_all();
-    void setstop();
-
+    bool stop_ = false;
 };

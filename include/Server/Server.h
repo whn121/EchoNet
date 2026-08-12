@@ -4,28 +4,19 @@
 #include "ThreadPool/IoThreadPool.h"
 #include "ThreadPool/WorkThreadPool.h"
 #include "Net/Socket.h"
-#include "Server/Server.h"
+#include <memory>
 
-
-class Server
-{
+// 服务器主类，组装所有组件
+class Server {
 public:
-    Server(int ionums = 4, int worknums = 4);
+    Server();
     ~Server();
-
+    bool start();   // 启动服务
+    void stop();    // 停止服务
 private:
-    Socket listen_socket_; //保证监听fd的生命周期
-
-    EventLoop mainloop_;
-    Acceptor acceptor_;
-
-    IoThreadPool iopool_;
-    WorkThreadPool workpool_;
-
-    int iopoolnums_;
-    int workpoolnums_;
-
-public:
-    bool start();
-
+    Socket listen_socket_;               // 监听套接字
+    EventLoop mainloop_;                 // 主事件循环
+    std::unique_ptr<Acceptor> acceptor_; // 接受器
+    IoThreadPool iopool_;                // IO线程池
+    WorkThreadPool workpool_;            // 业务线程池
 };

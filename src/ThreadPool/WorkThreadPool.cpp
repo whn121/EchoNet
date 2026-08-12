@@ -1,52 +1,34 @@
 #include "ThreadPool/WorkThreadPool.h"
 #include "Net/Connection.h"
+#include "HTTP/HttpService.h"
+#include <any>
 
-WorkThreadPool::WorkThreadPool(int num)
-{
-    nums_ = num;
-    stop_ = false;
-    for (int  i = 0; i < nums_; i++)
-    {
-        thread_vector_.emplace_back([this]{worker_();});//非静态成员函数的调用必须绑定this指针
-        //平时是被偷偷加上this了worker() ->worker(this)
-        //这里不会被偷偷加
-    }
+WorkThreadPool::WorkThreadPool(int num) : num_(num) {
+    for (int i = 0; i < num; ++i)
+        threads_.emplace_back([this] { worker(); });
 }
 
-WorkThreadPool::~WorkThreadPool()
-{
-    stop();
+WorkThreadPool::~WorkThreadPool() { stop(); }
+
+void WorkThreadPool::submit(Task task) {
+    queue_.push(std::move(task));
 }
 
-void WorkThreadPool::submit_(Task work)
-{
-    taskqueue_.push_(work);
-}
-
-void WorkThreadPool::worker_()
-{
-    while (!stop_)
-    {
-        Task task = taskqueue_.pop_();
+void WorkThreadPool::worker() {
+    while (!stop_) {
+        Task task = queue_.pop();  // 阻塞获取任务
         auto conn = task.conn_;
-        if (conn)
-        {
-            HttpResponse reqs = conn -> handle(task.req_);
-            conn -> setResponse (reqs);
-        }
+        if (!conn) continue;       // 空任务，可能为停止信号
+        // 从any中取出HttpRequest
+        auto request = std::any_cast<HttpRequest>(task.message_);
+        HttpResponse response = HttpService::handle(request);  // 业务处理
+        conn->sendResponse(response);  // 发送响应
     }
 }
 
-void WorkThreadPool::stop()
-{
+void WorkThreadPool::stop() {
+    if (stop_) return;
     stop_ = true;
-    taskqueue_.setstop();
-    taskqueue_.cvnotify_all();
-    for (auto& v : thread_vector_)
-    {
-        if (v.joinable())
-        {
-            v.join();
-        }
-    }
+    queue_.stop();  // 唤醒所有等待线程
+    for (auto& t : threads_) if (t.joinable()) t.join();
 }

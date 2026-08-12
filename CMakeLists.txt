@@ -19,6 +19,9 @@ add_executable(EchoNet
     src/HTTP/HttpContext.cpp 
     src/HTTP/HttpService.cpp
     src/Server/Server.cpp
+    src/Common/Config.cpp
+    src/Protocol/HttpProtocol.cpp
+
 )
 
 target_include_directories(EchoNet PRIVATE ${PROJECT_SOURCE_DIR}/include)
