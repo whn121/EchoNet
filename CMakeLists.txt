@@ -21,7 +21,10 @@ add_executable(EchoNet
     src/Server/Server.cpp
     src/Common/Config.cpp
     src/Protocol/HttpProtocol.cpp
-
+    src/Room/Room.cpp
+    src/Session/Session.cpp
+    src/ChatService/ChatService.cpp
+    src/Protocol/MyProtocol.cpp
 )
 
 target_include_directories(EchoNet PRIVATE ${PROJECT_SOURCE_DIR}/include)

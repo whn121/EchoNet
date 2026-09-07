@@ -4,14 +4,20 @@
 std::string HttpService::memory_;
 std::mutex HttpService::mtx_;
 
-HttpResponse HttpService::handle(const HttpRequest& httprequest) {
+HttpResponse HttpService::handle(const HttpRequest& httprequest) 
+{
     HttpResponse httpresponse;
-    std::lock_guard<std::mutex> lock(mtx_);   // 锁住，保证线程安全
+    
+    //先去掉锁测试极限以后会接入myaql进行修改
+    //std::lock_guard<std::mutex> lock(mtx_);   // 锁住，保证线程安全
 
-    if (httprequest.method_ == Method::GET) {
+    if (httprequest.method_ == Method::GET) 
+    {
         // GET：返回 memory_ 中的内容，末尾加换行
         httpresponse.body_ = memory_ + "\n";
-    } else if (httprequest.method_ == Method::POST) {
+    } 
+    else if (httprequest.method_ == Method::POST) 
+    {
         // POST：追加 body 到 memory_
         httpresponse.body_ = "我收到并存在memory里\n";
         memory_.append(httprequest.body_);
@@ -25,6 +31,5 @@ HttpResponse HttpService::handle(const HttpRequest& httprequest) {
     httpresponse.header_["Content-Length"] = std::to_string(httpresponse.body_.size());
     httpresponse.header_["Connection"] = "keep-alive";   // 支持长连接
 
-    INFO("响应体生成完成");
     return httpresponse;
 }

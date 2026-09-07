@@ -10,7 +10,8 @@ enum class IP { ipv4, ipv6 };
 enum class Proto { tcp, udp };
 
 // 简单socket封装（目前仅支持TCP）
-class Socket {
+class Socket 
+{
 public:
     Socket();
     ~Socket();

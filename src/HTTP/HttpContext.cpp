@@ -2,6 +2,7 @@
 #include "Logger/logger.h"
 #include <sstream>      // std::stringstream 用于拆分请求行
 #include <cstring>      // memmem 函数（POSIX 扩展）
+#include <string_view> //c++17新特性,只读字符串视图就好像(长度+内容)
 
 // ---------- 解析请求行 ----------
 bool HttpContext::lineContext(const std::string& line, HttpRequest& httprequest)
@@ -60,20 +61,14 @@ bool HttpContext::bodyContext(const std::string& body, HttpRequest& httprequest)
 // ---------- 主解析状态机 ----------
 ParseResult HttpContext::parse(Buffer& buffer, HttpRequest& httprequest)
 {
+    isError_ = false; //防止错误状态残留影响下一次解析
+
     const char* data = buffer.peek();   // 指向可读数据起始地址
     size_t len = buffer.getreadable();  // 可读数据长度
 
     if (len == 0)
     {
         return ParseResult::NEED_MORE;  // 没有任何数据，等待下次接收
-    }
-
-    // 如果上一次解析已经完成（状态为 DONE），但调用方未重置，
-    // 则先重置状态，并返回 OK（告知上层之前那个请求已完成）
-    if (parsestate_ == ParseState::DONE) 
-    {
-        parsestate_ = ParseState::REQUEST_LINE;
-        return ParseResult::OK;   // 注意：这里应为 ParseResult::OK，而不是 ok
     }
 
     size_t consumed = 0;  // 记录已消费（已解析）的字节数
@@ -83,19 +78,19 @@ ParseResult HttpContext::parse(Buffer& buffer, HttpRequest& httprequest)
         // ===== 状态：解析请求行 =====
         if (parsestate_ == ParseState::REQUEST_LINE)
         {
-            // 在当前可读数据中查找 "\r\n"（行结束标记）
-            const char* line_end = (const char*)memmem(data + consumed, len - consumed, "\r\n", 2);
-            if (!line_end) break;  // 没找到完整的行，退出循环，等待更多数据
+            // 在当前可读数据中查找 "\r\n"（行结束标记）memmem是拓展的不在标准库里所以不使用strng_view c++17新特性只读字符串视图fidn等方便不拷贝等
+            std::string_view view(data + consumed, len - consumed);//获取视图只读几乎0开销,用于只读用完就扔
+            auto pos = view.find("\r\n");
+            if (pos == std::string_view::npos) break;
 
-            size_t line_len = line_end - (data + consumed);  // 请求行长度（不含\r\n）
-
-            // 调用 lineContext 解析这一行
-            bool iflc = lineContext(std::string(data + consumed, line_len), httprequest);
-            if (!iflc)
+            size_t line_len = pos; //行长度(不包括\r\n)
+            
+            //调用解析lineContext
+            if (!lineContext (std::string(data + consumed, line_len), httprequest)) 
             {
-                isError_ = true;            // 标记解析错误
-                return ParseResult::ERROR;  // 返回错误
-            }
+                isError_ = true;       //标记解析错误
+                return ParseResult::ERROR; //返回错误
+            } 
 
             consumed += line_len + 2;  // 跳过请求行和 \r\n
             parsestate_ = ParseState::HEADERS;  // 进入头部解析状态
@@ -105,10 +100,11 @@ ParseResult HttpContext::parse(Buffer& buffer, HttpRequest& httprequest)
         else if (parsestate_ == ParseState::HEADERS)
         {
             // 查找下一行的 \r\n
-            const char* headerline_end = (const char*)memmem(data + consumed, len - consumed, "\r\n", 2);
-            if (!headerline_end) break;  // 行不完整，等待更多数据
+            std::string_view view(data + consumed, len - consumed);
+            auto pos = view.find("\r\n");
+            if (pos == std::string_view::npos) break;
 
-            size_t headerline_len = headerline_end - (data + consumed);
+            size_t headerline_len = pos;
 
             // 如果行长度为0，说明遇到了空行，头部结束
             if (headerline_len == 0) 
@@ -147,14 +143,37 @@ ParseResult HttpContext::parse(Buffer& buffer, HttpRequest& httprequest)
                 isError_ = true;
                 return ParseResult::ERROR;
             }
+            
+            //进行"Content-Length"合法性检测
+            const std::string& len_str = it -> second;
 
-            size_t size_body = 0;
-            try {
-                size_body = std::stoul(it->second);  // 将字符串转为无符号长整型
+            //1.检测是否为纯数字且非空
+            if (len_str.empty() || len_str.find_first_not_of("0123456789") != std::string::npos) 
+            {
+                LOG_ERROR("Invalid Content-Length: " + len_str);
+                isError_ = true;
+                return ParseResult::ERROR;
             }
-            catch (...) 
+
+            //2.转换为size_t, 捕获可能异常
+            size_t size_body = 0;
+            try 
+            {
+                size_body = std::stoul(len_str);  // 将字符串转为无符号长整型
+            }
+            catch (const std::exception& e) 
             {
                 // 转换失败（如非数字），视为解析错误
+                LOG_ERROR("Content-Length conversion failed: " + len_str);
+                isError_ = true;
+                return ParseResult::ERROR;
+            }
+
+            //3.限制最大body大小(例如1mb)
+            const size_t MAX_HTTP_BODY_SIZE = 1024 * 1024;
+            if (size_body > MAX_HTTP_BODY_SIZE)
+            {
+                LOG_ERROR("Content-Length too large: " + std::to_string(size_body));
                 isError_ = true;
                 return ParseResult::ERROR;
             }

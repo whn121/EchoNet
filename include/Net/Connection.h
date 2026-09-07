@@ -10,7 +10,8 @@
 #include "Protocol/Protocol.h"      // 只依赖抽象协议，不依赖 HTTP
 
 // 表示一个 TCP 连接，管理读写缓冲区、协议解析、回调投递
-class Connection : public std::enable_shared_from_this<Connection> {
+class Connection : public std::enable_shared_from_this<Connection> 
+{
 public:
     Connection(int afd, std::unique_ptr<Channel> channel, EventLoop* loop,
                std::unique_ptr<Protocol> protocol);
@@ -36,4 +37,7 @@ private:
     std::function<void(int)> closeCallBack_;   // 关闭回调（通知 EventLoop 清理）
     std::unique_ptr<Protocol> protocol_;       // 协议对象（多态）
     std::function<void(Task)> worksumbitcallback_; // 将任务投递给工作线程池的回调
+    //防止重复关闭
+    bool closing_ = false; //是否正在关闭/已关闭，只能在EventLoop线程访问
+    void handleClose();      // 统一关闭入口
 };

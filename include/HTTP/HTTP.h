@@ -11,7 +11,8 @@ enum class Method { GET, POST, UNKNOWN };
 enum class Version { HTTP10, HTTP11, UNKNOWN };
 
 // HTTP请求结构体
-struct HttpRequest {
+struct HttpRequest 
+{
     Method method_ = Method::UNKNOWN;
     std::string path_;
     Version version_ = Version::UNKNOWN;
@@ -20,7 +21,8 @@ struct HttpRequest {
 };
 
 // HTTP响应结构体
-struct HttpResponse {
+struct HttpResponse 
+{
     Version version_ = Version::UNKNOWN;
     int status_code_;
     std::string status_msg_;

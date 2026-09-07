@@ -5,7 +5,8 @@
 #include "Task.h"
 
 // 线程安全的任务队列（阻塞队列）
-class TaskQueue {
+class TaskQueue 
+{
 public:
     void push(Task task);
     Task pop();                 // 阻塞直到有任务或停止

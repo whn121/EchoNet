@@ -7,14 +7,16 @@
 class Buffer;   // 前向声明
 
 // 解析结果枚举，让上层（Connection）能够区分三种状态
-enum class ParseResult {
+enum class ParseResult 
+{
     OK,        // 成功解析出一个完整消息
     NEED_MORE, // 数据不足，需要继续接收
     ERROR      // 协议错误，应返回错误响应或关闭连接
 };
 
 // 协议抽象基类，所有具体协议（HTTP、自定义协议等）必须继承它
-class Protocol {
+class Protocol 
+{
 public:
     virtual ~Protocol() = default;
 

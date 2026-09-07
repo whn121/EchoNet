@@ -7,7 +7,8 @@
 
 
 // HTTP 协议实现，继承 Protocol 抽象类
-class HttpProtocol : public Protocol {
+class HttpProtocol : public Protocol 
+{
 public:
     ~HttpProtocol() override;
 

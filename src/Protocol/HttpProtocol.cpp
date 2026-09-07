@@ -4,10 +4,12 @@
 
 HttpProtocol::~HttpProtocol() {}
 
-ParseResult HttpProtocol::parse(Buffer& buffer) {
+ParseResult HttpProtocol::parse(Buffer& buffer) 
+{
     // 委托给状态机解析
     ParseResult res = httpcontext_.parse(buffer, httprequest_);
-    if (res == ParseResult::ERROR) {
+    if (res == ParseResult::ERROR) 
+    {
         // 构造一个 400 Bad Request 响应，供 Connection 层取用
         errorResponse_.version_ = Version::HTTP11;
         errorResponse_.status_code_ = 400;
@@ -20,18 +22,21 @@ ParseResult HttpProtocol::parse(Buffer& buffer) {
     return res;
 }
 
-void HttpProtocol::reset() {
+void HttpProtocol::reset() 
+{
     httprequest_ = HttpRequest();                 // 请求对象清零
     httpcontext_.parsestate_ = HttpContext::ParseState::REQUEST_LINE; // 状态重置
     httpcontext_.isError_ = false;
     hasError_ = false;
 }
 
-std::any HttpProtocol::getMessage() {
+std::any HttpProtocol::getMessage() 
+{
     return httprequest_;   // 返回解析好的 HttpRequest
 }
 
-std::string HttpProtocol::encode(const std::any& message) {
+std::string HttpProtocol::encode(const std::any& message) 
+{
     // 从 any 中取出 HttpResponse
     auto response = std::any_cast<HttpResponse>(message);
     std::stringstream ss;
@@ -41,7 +46,8 @@ std::string HttpProtocol::encode(const std::any& message) {
     ss << ver << " " << response.status_code_ << " " << response.status_msg_ << "\r\n";
 
     // 头部字段
-    for (const auto& [key, value] : response.header_) {
+    for (const auto& [key, value] : response.header_) 
+    {
         ss << key << ": " << value << "\r\n";
     }
 
@@ -49,7 +55,8 @@ std::string HttpProtocol::encode(const std::any& message) {
     return ss.str();
 }
 
-std::optional<std::any> HttpProtocol::getErrorResponse() {
+std::optional<std::any> HttpProtocol::getErrorResponse() 
+{
     if (hasError_) return errorResponse_;   // 返回错误响应
     return std::nullopt;                    // 无错误
 }

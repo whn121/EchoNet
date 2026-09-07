@@ -11,7 +11,7 @@
 #include <iomanip>     // put_time, setw, setfill
 
 
-class logger
+class logger 
 {
 public:
     //日志级别
@@ -52,7 +52,7 @@ private:
         localtime_r(&time_t_now, &local_tm);   // 线程安全版本 
 
         std::stringstream ss;
-        ss << std::put_time (std::localtime (&time_t_now), "%Y-%m-%d %H:%M:%S"); //格式化年月日时分秒
+        ss << std::put_time (&local_tm, "%Y-%m-%d %H:%M:%S"); //格式化年月日时分秒
         ss << "." << std::setfill ('0') << std::setw (3) << ms.count(); //追加毫秒 固定3位填充0
 
         return ss.str();
@@ -60,7 +60,7 @@ private:
 
 };
 
-// 便捷宏，LOG_ERROR 自动附带 errno 信息
-#define INFO(msg) logger::instance().Log(logger::LEVEL::INFO, msg)
-#define WARN(msg) logger::instance().Log(logger::LEVEL::WARN, msg)
-#define ERROR(msg) logger::instance().Log(logger::LEVEL::ERROR, msg)
+// 便捷宏
+#define LOG_INFO(msg) logger::instance().Log(logger::LEVEL::INFO, msg)
+#define LOG_WARN(msg) logger::instance().Log(logger::LEVEL::WARN, msg)
+#define LOG_ERROR(msg) logger::instance().Log(logger::LEVEL::ERROR, msg)

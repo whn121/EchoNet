@@ -7,7 +7,8 @@
 
 class IoThreadPool;
 
-class Acceptor {
+class Acceptor 
+{
 public:
     Acceptor(int fd, EventLoop* loop, IoThreadPool* pool);
     void listen();

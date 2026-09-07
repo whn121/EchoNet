@@ -3,9 +3,11 @@
 #include <vector>
 #include <thread>
 #include <functional>
+#include <atomic>
 
 // 业务线程池：执行具体的业务逻辑（HttpService::handle）
-class WorkThreadPool {
+class WorkThreadPool 
+{
 public:
     WorkThreadPool(int num = 4);
     ~WorkThreadPool();
@@ -14,7 +16,7 @@ public:
 private:
     void worker();            // 工作线程主函数
     int num_;
-    bool stop_ = false;
+    std::atomic<bool> stop_{false};
     TaskQueue queue_;
     std::vector<std::thread> threads_;
 };

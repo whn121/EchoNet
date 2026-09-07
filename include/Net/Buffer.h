@@ -5,7 +5,8 @@
 #include <cstring>
 
 // 自动扩容的读写缓冲区（类似环形缓冲区，但通过整理数据实现）
-class Buffer {
+class Buffer 
+{
 public:
     Buffer();
     ~Buffer();
