@@ -41,13 +41,13 @@ void Room::broadcast(const MyMessage &mag)
 
     for (auto& session : members_copy)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
         session->send(mag);
     }
 }
 
 size_t Room::memberCount() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return members_.size();
 }
 
