@@ -18,6 +18,15 @@ ParseResult MyProtocol::parse (Buffer& buffer)
     memcpy (&net_body_len, data, 4);//原样一次字节拷贝,按第一个参数类型规则解读
     uint32_t body_len = ntohl (net_body_len);
 
+    //边界检测防止传一个小的数
+    if (body_len < 6) 
+    {
+        hasError_ = true;
+        shouldSendError_ = false;   // 致命错误，直接关连接
+        errorPayload_ = "Invalid body length";
+        return ParseResult::ERROR;
+    }
+
     //上限检查防止永远无法满足len >= 4 + body_len一直报错
     const uint32_t MAX_BODY_LEN = 1024 * 1024;   // 1MB
     if (body_len > MAX_BODY_LEN) 
@@ -47,7 +56,7 @@ ParseResult MyProtocol::parse (Buffer& buffer)
     buffer.goReadPtr (4 + body_len);
 
     //类型检测
-    if (type_val < uint16_t (MyType::LOGIN_REQ) || type_val > uint16_t (MyType::ERROR_RESP))
+    if (!isValidMsgType(type_val))
     {
         hasError_ = true;
         shouldSendError_ = true;
@@ -80,6 +89,29 @@ std::string MyProtocol::encodeMessage(MyType type, uint32_t id, const std::strin
     return packet;
 }
 
+bool  MyProtocol::isValidMsgType(uint16_t t)
+{
+    switch (static_cast<MyType>(t)) {
+        case MyType::LOGIN_REQ:
+        case MyType::LOGIN_RESP:
+        case MyType::CREATE_ROOM_REQ:
+        case MyType::CREATE_ROOM_RESP:
+        case MyType::JOIN_ROOM_REQ:
+        case MyType::JOIN_ROOM_RESP:
+        case MyType::LEAVE_ROOM_REQ:
+        case MyType::LEAVE_ROOM_RESP:
+        case MyType::SEND_MSG_REQ:
+        case MyType::SEND_MSG_RESP:
+        case MyType::BROADCAST_MSG:
+        case MyType::HEARTBEAT_REQ:
+        case MyType::HEARTBEAT_RESP:
+        case MyType::ERROR_RESP:
+        case MyType::MEMBER_COUNT_UPDATE:
+            return true;
+        default:
+            return false;
+    }
+}
 
 std::string MyProtocol::encode(const std::any &message)
 {

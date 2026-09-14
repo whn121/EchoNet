@@ -39,7 +39,15 @@ MySQLPool::~MySQLPool()
 std::shared_ptr<MYSQL> MySQLPool::getConnection()
 {
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return !pool_.empty(); });
+    
+    //降级,修复阻塞无超时问题
+    bool ok = cv_.wait_for(lock, std::chrono::milliseconds(500), [this] { return !pool_.empty(); });
+    if (!ok) 
+    {
+        LOG_ERROR("MySQLPool getConnection timeout");
+        return nullptr;
+    }
+
     MYSQL* conn = pool_.front();
     pool_.pop();
     lock.unlock();   // 解锁再做健康检查

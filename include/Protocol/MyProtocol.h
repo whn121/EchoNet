@@ -59,6 +59,8 @@ public:
     // 辅助编码函数:根据类型和payload生成完整二进制消息
     static std::string encodeMessage (MyType type, uint32_t id, const std::string& payload);
 
+    static bool isValidMsgType(uint16_t t); //判断协议是否正确
+
 private:
     MyMessage currentMessage_; // 最新消息
     bool hasError_ = false;

@@ -3,6 +3,7 @@
 #include <fcntl.h>      // fcntl
 #include <unistd.h>     // close 等（如有需要）
 #include <netinet/tcp.h> //关闭Nagle算法(防止大量小包等待数据满了再发)
+#include "Logger/AsyncLogger.h"
 
 
 // 构造函数：保存监听 fd、事件循环、IO 线程池，并创建对应的 Channel
@@ -35,9 +36,6 @@ void Acceptor::handleAccept()
     {
         int afd = accept4(fd_, (sockaddr*)&addr, &len, SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-        int one = 1;
-        setsockopt(afd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
         if (afd < 0) 
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK) 
@@ -51,6 +49,13 @@ void Acceptor::handleAccept()
             // 其他错误，可以记录日志（如果你有）
             break;
         }
+
+        int one = 1;
+        if (setsockopt(afd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)) < 0)
+    {
+        LOG_WARN("setsockopt TCP_NODELAY failed");
+        // 不 return，TCP_NODELAY 不是必须
+    }
 
         if (newConnectionCallback_) 
         {

@@ -60,4 +60,6 @@ private:
 
     void checkAndRemoveEmptyRoom(uint32_t room_id); //辅助空房间清理
 
+    void initIdsFromDatabase(); //启东市回复id
+
 };

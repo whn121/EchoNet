@@ -8,6 +8,8 @@
 #include "Reactor/EventLoop.h"
 #include "ThreadPool/Task.h"
 #include "Protocol/Protocol.h"      // 只依赖抽象协议，不依赖 HTTP
+#include <mutex>
+
 
 // 表示一个 TCP 连接，管理读写缓冲区、协议解析、回调投递
 class Connection : public std::enable_shared_from_this<Connection> 
@@ -28,8 +30,9 @@ public:
     void init();                                          // 初始化回调绑定
     void setCallBack(std::function<void(Task)>);          // 设置业务处理回调
     void close();// 线程安全的关闭方法，可以从任意线程调用
-    
 
+    std::mutex& getBusinessMutex() { return business_mutex_; } //解决 同一个连接的消息被多个 Worker 并行处理,不能按顺序处理
+    
 private:
     int afd_;                                  // socket 文件描述符
     EventLoop* loop_;                          // 所属的事件循环（该连接所有事件在此 loop 中处理）
@@ -42,4 +45,7 @@ private:
     //防止重复关闭
     bool closing_ = false; //是否正在关闭/已关闭，只能在EventLoop线程访问
     void handleClose();      // 统一关闭入口
+
+    std::mutex business_mutex_;
+   
 };

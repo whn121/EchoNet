@@ -27,16 +27,12 @@ void WorkThreadPool::worker()
         auto conn = task.conn_;
         if (!conn) continue;       // 空任务，可能为停止信号
         
+        // 用该连接的锁串行处理
+        std::lock_guard<std::mutex> lock(conn->getBusinessMutex());
+
         // 从any中取出HttpRequest
-        try 
-        {
-            auto msg = std::any_cast<MyMessage>(task.message_);
-            ChatService::instance().handleMessage(task.conn_, msg);
-        }
-        catch (const std::bad_any_cast& e)
-        {
-            LOG_ERROR("std::bad_any_cast in worker: " + std::string(e.what()));
-        }
+        auto msg = std::any_cast<MyMessage>(task.message_);
+        ChatService::instance().handleMessage(task.conn_, msg);
     }
 }
 

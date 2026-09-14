@@ -9,6 +9,9 @@ ChatService::ChatService()
     mysqlPool_ = std::make_unique<MySQLPool>("127.0.0.1", "root", "2788138053", "echonet", 4);
     redisPool_ = std::make_unique<RedisPool>("127.0.0.1", 6379, 4);
 
+    // 从数据库恢复 next_room_id_
+    initIdsFromDatabase();
+
     // 启动心跳检查线程
     heartbeat_thread_ = std::thread([this] { heartbeatLoop(); });
 }
@@ -200,8 +203,7 @@ void ChatService::handleLogin(std::shared_ptr<Connection> conn, const MyMessage 
     uint32_t user_id = next_session_id_++;
 
     // 创建 Session
-    auto session = std::make_shared<Session>(conn);
-    session->setUser(user_id, username);
+    auto session = std::make_shared<Session>(conn, user_id, username);
 
     //存入表
     int fd = conn->getChannel()->getFd();
@@ -662,14 +664,104 @@ std::shared_ptr<Session> ChatService::getSessionByFd(int fd)
 
 void ChatService::checkAndRemoveEmptyRoom(uint32_t room_id)
 {
-    std::lock_guard<std::mutex> lock(rooms_mutex_);
-    auto it = rooms_.find(room_id);
-    if (it != rooms_.end() && it->second->memberCount() == 0) {
-        rooms_.erase(it);
-        LOG_INFO("Room " + std::to_string(room_id) + " removed (empty)");
+    // 第一步：从内存移除
+    bool removed_from_memory = false;
+    {
+        std::lock_guard<std::mutex> lock(rooms_mutex_);
+        auto it = rooms_.find(room_id);
+        if (it != rooms_.end() && it->second->memberCount() == 0)
+        {
+            rooms_.erase(it);
+            removed_from_memory = true;
+            LOG_INFO("Room " + std::to_string(room_id) + " removed from memory");
+        }
     }
+
+    if (!removed_from_memory) return;   // 非空，不处理
+
+    // 第二步：从 MySQL 删除
+    auto mysqlConn = mysqlPool_->getConnection();
+    if (!mysqlConn)
+    {
+        LOG_WARN("MySQL unavailable, cannot delete room " + std::to_string(room_id));
+        return;
+    }
+
+    MYSQL* raw = mysqlConn.get();
+    MYSQL_STMT* stmt = mysql_stmt_init(raw);
+    if (!stmt)
+    {
+        LOG_ERROR("mysql_stmt_init failed");
+        return;
+    }
+
+    const char* sql = "DELETE FROM rooms WHERE id = ?";
+    if (mysql_stmt_prepare(stmt, sql, strlen(sql)))
+    {
+        LOG_ERROR("mysql_stmt_prepare: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return;
+    }
+
+    MYSQL_BIND bind[1];
+    memset(bind, 0, sizeof(bind));
+    uint32_t rid = room_id;
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = &rid;
+    bind[0].buffer_length = sizeof(rid);
+
+    if (mysql_stmt_bind_param(stmt, bind))
+    {
+        LOG_ERROR("mysql_stmt_bind_param: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return;
+    }
+
+    if (mysql_stmt_execute(stmt))
+    {
+        LOG_ERROR("mysql_stmt_execute: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return;
+    }
+
+    mysql_stmt_close(stmt);
+    LOG_INFO("Room " + std::to_string(room_id) + " removed from MySQL");
 }
 
+void ChatService::initIdsFromDatabase()
+{
+    auto mysqlConn = mysqlPool_->getConnection();
+    if (!mysqlConn)
+    {
+        LOG_WARN("MySQL unavailable at startup, next_room_id_ starts from 1");
+        return;
+    }
+
+    MYSQL* raw = mysqlConn.get();
+
+    if (mysql_query(raw, "SELECT IFNULL(MAX(id), 0) FROM rooms") != 0)
+    {
+        LOG_ERROR("Failed to query MAX(id) from rooms");
+        return;
+    }
+
+    MYSQL_RES* res = mysql_store_result(raw);
+    if (!res)
+    {
+        LOG_ERROR("mysql_store_result failed");
+        return;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(res);
+    if (row && row[0])
+    {
+        uint32_t max_id = static_cast<uint32_t>(std::stoul(row[0]));
+        next_room_id_ = max_id + 1;
+        LOG_INFO("next_room_id_ initialized to " + std::to_string(next_room_id_.load()));
+    }
+
+    mysql_free_result(res);
+}
 
 void ChatService::onConnectionClosed(int fd) 
 {

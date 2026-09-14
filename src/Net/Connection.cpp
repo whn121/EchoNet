@@ -119,16 +119,17 @@ void Connection::write()
 // 接收任意类型的响应（any），由协议编码后放入输出缓冲区，并激活写事件
 void Connection::sendResponse(const std::any& response) 
 {
-    //编码可以放在当前线程（业务线程），因为 protocol_ 是只读的，不涉及 I/O 状态
-    std::string data = protocol_->encode(response);      // 协议编码
     //weak_ptr引用,确保执行期间存活,不然如果sendResponse被工作线程调用时,链接可能已经关闭并析构,回调执行时访问this,这时是空指针
     std::weak_ptr<Connection> weakself = shared_from_this();
 
     // 通过 runInLoop 保证线程安全地修改监听事件，激活 EPOLLOUT,将 outBuffer 追加和 epoll 事件修改打包投递到 I/O 线程执行
-    loop_->runInLoop([weakself, data = std::move (data)] 
+    loop_->runInLoop([weakself, response] 
     {
         auto self = weakself.lock ();
         if (!self) return;
+
+        //编码可以放在当前线程（业务线程），因为 protocol_ 是只读的，不涉及 I/O 状态
+        std::string data = self->protocol_->encode(response);      // 协议编码
 
         // 以下操作都在 I/O 线程执行，与 write() 同线程，无并发问题
         self -> outBuffer_.bufferAppend(data.data(), data.size());   // 放入输出缓冲区

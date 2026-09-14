@@ -38,9 +38,11 @@ void Room::broadcast(const MyMessage &mag)
         std::lock_guard<std::mutex> lock (mutex_);
         members_copy = members_; 
     }
-    for (auto it = members_.begin(); it != members_.end(); ++it)
+
+    for (auto& session : members_copy)
     {
-        (*it)->send (mag); //要加括号哭死 
+        std::lock_guard<std::mutex> lock(mutex_);
+        session->send(mag);
     }
 }
 
