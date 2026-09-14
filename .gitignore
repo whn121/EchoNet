@@ -21,3 +21,24 @@ Thumbs.db
 # ===== IDE =====
 .vscode/
 .idea/
+
+# QT / QtCreator
+*.user
+build_qt_out/
+*.pro.user
+*.autogen
+moc_*.cpp
+ui_*.h
+
+# 临时测试二进制、可执行文件
+redis_text/deadlock
+redis_text/leak
+redis_text/segfault
+text_buffer
+text_channel
+text_connection
+text_eventloop
+
+# python缓存
+__pycache__/
+*.pyc

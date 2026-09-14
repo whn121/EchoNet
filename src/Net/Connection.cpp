@@ -1,5 +1,6 @@
 #include "Net/Connection.h"
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
+#include "Metrics/Metrics.h"
 
 
 // 构造函数：转移 Channel 和 Protocol 的所有权，保存 EventLoop 指针
@@ -9,7 +10,7 @@ Connection::Connection(int afd, std::unique_ptr<Channel> channel, EventLoop* loo
 
 Connection::~Connection() 
 {
-    if (afd_ != -1) close(afd_);   // 关闭套接字
+    if (afd_ != -1) ::close(afd_);   // 关闭套接字
 }
 
 // ---------- 读事件处理 ----------
@@ -25,6 +26,7 @@ void Connection::read()
         if (n > 0) 
         {
             inBuffer_.bufferAppend(buf, n);   // 追加到输入缓冲区
+            Metrics::bytes_read += n;   
             //继续循环
         }
         else if (n == 0)
@@ -90,6 +92,7 @@ void Connection::write()
         if (n > 0) 
         {
             outBuffer_.goReadPtr(n);   // 发送成功，移动读指针
+            Metrics::bytes_written += n; 
         }
         else if (n == 0) 
         {
@@ -165,10 +168,23 @@ void Connection::setCallBack(std::function<void(Task)> callback)
     worksumbitcallback_ = callback;   // 设置业务处理回调
 }
 
-void Connection::handleClose() {
+void Connection::close()
+{
+    std::weak_ptr<Connection> weakself = shared_from_this();
+    loop_->runInLoop([weakself] {
+        auto self = weakself.lock();
+        if (self) {
+            self->handleClose();   // 在 EventLoop 线程里执行
+        }
+    });
+}
+
+void Connection::handleClose() 
+{
     if (closing_) return;          // 已经关闭，防止重复
     closing_ = true;
-    if (closeCallBack_) {
+    if (closeCallBack_) 
+    {
         closeCallBack_(afd_);
     }
 }

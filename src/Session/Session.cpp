@@ -21,23 +21,25 @@ void Session::setRoomId(uint32_t room_id)
     room_id_ = room_id;
 }
 
-void Session::updateActiveTime()
-{
-    auto sec = std::chrono::system_clock::to_time_t (std::chrono::system_clock::now());
-    last_active_time_ = sec;
-}
-
 uint32_t Session::getRoomId() const
 {
     return room_id_;
 }
 
-time_t Session::getActiveTime() const
-{
-    return last_active_time_;
-}
-
 std::string Session::getUsername() const
 {
     return user_name_;
+}
+
+uint32_t Session::getUserId() const
+{
+    return user_id_;
+}
+
+void Session::close()
+{
+    if (connection_) 
+    {
+        connection_->close();   // 调用 Connection 的线程安全关闭方法
+    }
 }

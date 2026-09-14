@@ -27,6 +27,8 @@ public:
     void myClose();                                       // 主动关闭连接
     void init();                                          // 初始化回调绑定
     void setCallBack(std::function<void(Task)>);          // 设置业务处理回调
+    void close();// 线程安全的关闭方法，可以从任意线程调用
+    
 
 private:
     int afd_;                                  // socket 文件描述符

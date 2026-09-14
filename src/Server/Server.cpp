@@ -1,7 +1,8 @@
 #include "Server/Server.h"
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
 #include "Common/Config.h"
 #include "Common/SignalHandler.h"
+#include "ChatService/ChatService.h"
 
 Server::Server()
     : iopool_(Config::instance().io_threads),
@@ -49,6 +50,7 @@ void Server::stop()
     mainloop_.stop();
     iopool_.stop();
     workpool_.stop();
+    ChatService::instance().printMetrics();   // 新增
 }
 
 void Server::setcreator (std::function<std::shared_ptr<Connection> (int afd, EventLoop* loop)> creator)

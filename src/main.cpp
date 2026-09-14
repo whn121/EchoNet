@@ -1,5 +1,5 @@
 #include "Common/Config.h"
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
 #include "Server/Server.h"
 #include "Protocol/HttpProtocol.h"
 #include <memory>
@@ -28,6 +28,9 @@ int main (int argc, char* argv[])
 
     server.stop ();
     LOG_INFO ("服务器安全退出");
+
+    AsyncLogger::instance().stop();
+    
     return 0;
 
 }

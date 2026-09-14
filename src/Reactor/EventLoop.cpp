@@ -2,7 +2,7 @@
 #include "Net/Connection.h"
 #include <sys/eventfd.h>
 #include <unistd.h>
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
 
 
 EventLoop::EventLoop() : owner_thread_id_ (std::this_thread::get_id())

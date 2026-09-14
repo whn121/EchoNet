@@ -1,5 +1,8 @@
 #include "Net/Socket.h"
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
+#include <cstring>
+#include <cerrno>    // 新增：errno
+
 
 Socket::Socket() : fd_(-1), ip_(""), addr{} {}
 Socket::~Socket() { if (fd_ > 0) close(fd_); }

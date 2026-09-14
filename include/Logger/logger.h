@@ -61,6 +61,6 @@ private:
 };
 
 // 便捷宏
-#define LOG_INFO(msg) logger::instance().Log(logger::LEVEL::INFO, msg)
-#define LOG_WARN(msg) logger::instance().Log(logger::LEVEL::WARN, msg)
-#define LOG_ERROR(msg) logger::instance().Log(logger::LEVEL::ERROR, msg)
+// #define LOG_INFO(msg) logger::instance().Log(logger::LEVEL::INFO, msg)
+// #define LOG_WARN(msg) logger::instance().Log(logger::LEVEL::WARN, msg)
+// #define LOG_ERROR(msg) logger::instance().Log(logger::LEVEL::ERROR, msg)

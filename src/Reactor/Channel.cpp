@@ -1,5 +1,5 @@
 #include "Reactor/Channel.h"
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
 
 Channel::Channel(int fd) : fd_(fd) {}
 Channel::~Channel() = default;

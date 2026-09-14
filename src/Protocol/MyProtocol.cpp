@@ -17,6 +17,17 @@ ParseResult MyProtocol::parse (Buffer& buffer)
     uint32_t net_body_len;
     memcpy (&net_body_len, data, 4);//原样一次字节拷贝,按第一个参数类型规则解读
     uint32_t body_len = ntohl (net_body_len);
+
+    //上限检查防止永远无法满足len >= 4 + body_len一直报错
+    const uint32_t MAX_BODY_LEN = 1024 * 1024;   // 1MB
+    if (body_len > MAX_BODY_LEN) 
+    {
+        hasError_ = true;
+        shouldSendError_ = false;   // 不发送错误响应
+        errorPayload_ = "Message too large";
+        return ParseResult::ERROR;
+    }
+
     if (len < (4 + body_len)) return ParseResult::NEED_MORE;
     data += 4;
 
@@ -39,6 +50,7 @@ ParseResult MyProtocol::parse (Buffer& buffer)
     if (type_val < uint16_t (MyType::LOGIN_REQ) || type_val > uint16_t (MyType::ERROR_RESP))
     {
         hasError_ = true;
+        shouldSendError_ = true;
         errorPayload_ = "Unknown message type";
         return ParseResult::ERROR;
     }
@@ -83,13 +95,14 @@ std::any MyProtocol::getMessage()
 void MyProtocol::reset()
 {
     hasError_ = false;
+    shouldSendError_ = false;    // 新增
     currentMessage_ = MyMessage();
     errorPayload_.clear();
 }
 
 std::optional<std::any> MyProtocol::getErrorResponse()
 {
-    if (hasError_)
+    if (hasError_ && shouldSendError_)
     {
         MyMessage errMsg;
         errMsg.type_ = MyType::ERROR_RESP;
@@ -97,6 +110,6 @@ std::optional<std::any> MyProtocol::getErrorResponse()
         errMsg.payload_ = errorPayload_;
         return errMsg;
     }
-    return std::nullopt;
+    return std::nullopt; //shouldSendError_ = false;   // 不发送错误响应
 }
 

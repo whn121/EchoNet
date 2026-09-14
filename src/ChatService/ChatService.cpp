@@ -1,7 +1,17 @@
 #include "ChatService/ChatService.h"
 #include <sstream>
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
+#include "Metrics/Metrics.h"
 
+
+ChatService::ChatService()
+{
+    mysqlPool_ = std::make_unique<MySQLPool>("127.0.0.1", "root", "2788138053", "echonet", 4);
+    redisPool_ = std::make_unique<RedisPool>("127.0.0.1", 6379, 4);
+
+    // 启动心跳检查线程
+    heartbeat_thread_ = std::thread([this] { heartbeatLoop(); });
+}
 
 ChatService& ChatService::instance()
 {
@@ -9,8 +19,19 @@ ChatService& ChatService::instance()
     return service;
 }
 
+ChatService::~ChatService()
+{
+    heartbeat_stop_ = true;
+    if (heartbeat_thread_.joinable()) 
+    {
+        heartbeat_thread_.join();
+    }
+}
+
 void ChatService::handleMessage (std::shared_ptr<Connection> conn, const MyMessage& msg)
 {
+    Metrics::total_requests++;   // 每条消息 +1
+
     switch (msg.type_)
     {
     case MyType::LOGIN_REQ:
@@ -34,6 +55,8 @@ void ChatService::handleMessage (std::shared_ptr<Connection> conn, const MyMessa
     default:
         // 未知类型，返回错误
         {
+            Metrics::error_requests++;
+
             MyMessage resp;
             resp.type_ = MyType::ERROR_RESP;
             resp.id_ = msg.id_;
@@ -62,14 +85,115 @@ void ChatService::handleLogin(std::shared_ptr<Connection> conn, const MyMessage 
     std::string username = payload.substr (0, pos);
     std::string userpassword = payload.substr (pos + 1);
     //验证密码
-    if (!(username == "whn" && userpassword == "278813" || username == "whnzs" && userpassword == "278813"))
+    // 从 MySQL 验证
+    bool valid = false;
+    auto mysqlConn = mysqlPool_->getConnection();
+    if (!mysqlConn)
+    {
+        LOG_ERROR("Failed to get MySQL connection");
+        MyMessage res;
+        res.type_ = MyType::LOGIN_RESP;
+        res.id_ = msg.id_;
+        res.payload_ = "sql conecction fail";
+        conn->sendResponse(res);
+        return;
+    }
+
+    MYSQL* raw = mysqlConn.get();
+
+    //使用预处理先构建语法树,再把数据当做参数传递,避免直接传拼接的会有sql注入的风险
+    MYSQL_STMT* stmt = mysql_stmt_init(raw);
+    if (!stmt)
+    {
+        LOG_ERROR("stmt_init failed");
+        // 返回 FAIL 响应
+        MyMessage resp;
+        resp.type_ = MyType::LOGIN_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    const char* sql = "SELECT password FROM users WHERE username=?";
+    if (mysql_stmt_prepare(stmt, sql, strlen(sql)))
+    {
+        LOG_ERROR("mysql_stmt_prepare: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        MyMessage resp;
+        resp.type_ = MyType::LOGIN_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    //绑定参数
+    MYSQL_BIND bind[1];
+    memset (bind, 0, sizeof(bind));
+    unsigned long username_len = username.length();
+    bind[0].buffer_type = MYSQL_TYPE_STRING;
+    bind[0].buffer = (void*)username.c_str();
+    bind[0].buffer_length = username_len;
+    bind[0].length = &username_len;
+
+    if (mysql_stmt_bind_param(stmt, bind)) {
+        LOG_ERROR("mysql_stmt_bind_param: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        MyMessage resp;
+        resp.type_ = MyType::LOGIN_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    if (mysql_stmt_execute(stmt)) {
+        LOG_ERROR("mysql_stmt_execute: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        MyMessage resp;
+        resp.type_ = MyType::LOGIN_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    // 绑定结果
+    MYSQL_BIND result_bind[1];
+    memset(result_bind, 0, sizeof(result_bind));
+    char db_password[256] = {0};
+    unsigned long db_password_len = 0;
+    result_bind[0].buffer_type = MYSQL_TYPE_STRING;
+    result_bind[0].buffer = db_password;
+    result_bind[0].buffer_length = sizeof(db_password);
+    result_bind[0].length = &db_password_len;
+
+    if (mysql_stmt_bind_result(stmt, result_bind)) {
+        LOG_ERROR("mysql_stmt_bind_result: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        MyMessage resp;
+        resp.type_ = MyType::LOGIN_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    int fetch_ret = mysql_stmt_fetch(stmt);
+    if (fetch_ret == 0 && userpassword == std::string(db_password, db_password_len)) {
+        valid = true;
+    }
+
+    mysql_stmt_close(stmt);
+
+    if (!valid) 
     {
         MyMessage resp;
         resp.type_ = MyType::LOGIN_RESP;
         resp.id_ = msg.id_;
         resp.payload_ = "FAIL";
-
-        conn->sendResponse (resp);
+        conn->sendResponse(resp);
         return;
     }
     // 分配用户ID
@@ -86,11 +210,34 @@ void ChatService::handleLogin(std::shared_ptr<Connection> conn, const MyMessage 
         sessions_[fd] = session;
     }
 
+    auto redisConn = redisPool_->getConnection();
+    
+    if (redisConn) 
+    {
+        redisContext* redis = redisConn.get();
+        redisReply* reply = (redisReply*)redisCommand(redis, "SET user:%d:online 1", user_id);
+        if (reply == nullptr) 
+        {
+            LOG_ERROR("Redis SET online failed: " + std::string(redis->errstr));
+        } 
+        else 
+        {
+            freeReplyObject(reply);
+        }
+    }
+    else 
+    {
+        LOG_WARN("Redis unavailable, skip SET online");
+    }
+
     MyMessage resp;
     resp.type_ = MyType::LOGIN_RESP;
     resp.id_ = msg.id_;
     resp.payload_ = "OK";
     conn->sendResponse(resp);
+
+    Metrics::total_connections++;
+    Metrics::active_connections++;
 
     LOG_INFO("User " + username + " logged in, fd=" + std::to_string(fd));//先用可能影响速度
 }
@@ -118,20 +265,110 @@ void ChatService::handleCreateRoom(std::shared_ptr<Connection> conn, const MyMes
         conn->sendResponse(resp);
         return;
     }
-
     uint32_t room_id = next_room_id_++;
+
+    // 插入 rooms 表
+    auto mysqlConn = mysqlPool_->getConnection();
+    
+    if (!mysqlConn)
+    {
+        LOG_ERROR("Failed to get MySQL connection");
+        MyMessage res;
+        res.type_ = MyType::CREATE_ROOM_RESP;
+        res.id_ = msg.id_;
+        res.payload_ = "FAIL";
+        conn->sendResponse(res);
+        return;
+    }
+
+    MYSQL* raw = mysqlConn.get();
+    MYSQL_STMT* stmt = mysql_stmt_init(raw);
+    
+    if (!stmt)
+    {
+        LOG_ERROR("mysql_stmt_init failed");
+        MyMessage resp;
+        resp.type_ = MyType::CREATE_ROOM_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    const char* sql = "INSERT INTO rooms (id, room_name) VALUES (?, ?)";
+   
+    if (mysql_stmt_prepare(stmt, sql, strlen(sql)))
+    {
+        LOG_ERROR("mysql_stmt_prepare: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        MyMessage resp;
+        resp.type_ = MyType::CREATE_ROOM_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    // 绑定两个参数
+    MYSQL_BIND bind[2];
+    memset(bind, 0, sizeof(bind));
+
+    // 第一个参数：room_id（整数）
+    uint32_t room_id_val = room_id;
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = &room_id_val;
+    bind[0].buffer_length = sizeof(room_id_val);
+
+    // 第二个参数：room_name（字符串）
+    unsigned long name_len = room_name.length();
+    bind[1].buffer_type = MYSQL_TYPE_STRING;
+    bind[1].buffer = (void*)room_name.c_str();
+    bind[1].buffer_length = name_len;
+    bind[1].length = &name_len;
+
+    if (mysql_stmt_bind_param(stmt, bind))
+    {
+        LOG_ERROR("mysql_stmt_bind_param: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        MyMessage resp;
+        resp.type_ = MyType::CREATE_ROOM_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    if (mysql_stmt_execute(stmt))
+    {
+        LOG_ERROR("mysql_stmt_execute: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        MyMessage resp;
+        resp.type_ = MyType::CREATE_ROOM_RESP;
+        resp.id_ = msg.id_;
+        resp.payload_ = "FAIL";
+        conn->sendResponse(resp);
+        return;
+    }
+
+    mysql_stmt_close(stmt);
+
+    // 创建 Room 对象，存入内存 rooms_
     auto room = std::make_shared<Room> (room_id, room_name);
     {
         std::lock_guard<std::mutex> lock (rooms_mutex_);
         rooms_[room_id] = room;
     }
 
+    // 创建者自动加入房间
+    room->addMember(session);
+    session->setRoomId(room_id);
+
+    // 返回房间ID和人数：格式 "OK|room_id|1"
     MyMessage resp;
     resp.type_ = MyType::CREATE_ROOM_RESP;
     resp.id_ = msg.id_;
-    resp.payload_ = std::to_string(room_id);
+    resp.payload_ = "OK|" + std::to_string(room_id) + "|1";
     conn->sendResponse(resp);
-
 }
 
 void ChatService::handleJionRoom(std::shared_ptr<Connection> conn, const MyMessage & msg)
@@ -180,11 +417,33 @@ void ChatService::handleJionRoom(std::shared_ptr<Connection> conn, const MyMessa
     // 加入新房间
     target_room->addMember(session);
     session->setRoomId(room_id);
+    broadcastMemberCount(room_id);//人数更新
+
+    auto redisConn = redisPool_->getConnection();
+    
+    if (redisConn) 
+    {
+        redisContext* redis = redisConn.get();
+        redisReply* reply = (redisReply*)redisCommand(redis, "SADD room:%d:members %d", room_id, session->getUserId());
+        if (reply == nullptr) 
+        {
+            LOG_ERROR("Redis SADD room member failed: " + std::string(redis->errstr));
+        } 
+        else 
+        {
+            freeReplyObject(reply);
+        }
+    }
+    else 
+    {
+        LOG_WARN("Redis unavailable, skip SADD room member");
+    }
 
     MyMessage resp;
     resp.type_ = MyType::JOIN_ROOM_RESP;
     resp.id_ = msg.id_;
-    resp.payload_ = "OK";
+    size_t count = target_room->memberCount();
+    resp.payload_ = "OK|" + std::to_string(count);
     conn->sendResponse(resp);
 
 }
@@ -213,6 +472,30 @@ void ChatService::handleLeaveRoom(std::shared_ptr<Connection> conn, const MyMess
         session -> setRoomId (0);
     }
 
+    broadcastMemberCount(room_id);//人数更新
+
+    // 检查并清理空房间
+    checkAndRemoveEmptyRoom(room_id);
+
+    auto redisConn = redisPool_->getConnection();
+    
+    if (redisConn) 
+    {
+        redisContext* redis = redisConn.get();
+        redisReply* reply = (redisReply*)redisCommand(redis, "SREM room:%d:members %d", room_id, session->getUserId());
+        if (reply == nullptr) 
+        {
+            LOG_ERROR("Redis SREM room member failed: " + std::string(redis->errstr));
+        } 
+        else 
+        {
+            freeReplyObject(reply);
+        }
+    }
+    else 
+    {
+        LOG_WARN("Redis unavailable, skip SREM room member");
+    }
 
     MyMessage resp;
     resp.type_ = MyType::LEAVE_ROOM_RESP;
@@ -277,6 +560,70 @@ void ChatService::handleSendMessage(std::shared_ptr<Connection> conn, const MyMe
     resp.payload_ = "OK";
     conn->sendResponse(resp);
 
+    // 插入 messages 表
+    auto mysqlConn = mysqlPool_->getConnection();
+    if (!mysqlConn)
+    {
+        LOG_ERROR("Failed to get MySQL connection");
+        return; // 消息已广播，持久化失败不影响业务
+    }
+
+    MYSQL* raw = mysqlConn.get();
+
+    MYSQL_STMT* stmt = mysql_stmt_init(raw);
+    if (!stmt)
+    {
+        LOG_ERROR("mysql_stmt_init failed");
+        return;
+    }
+
+    const char* sql = "INSERT INTO messages (room_id, user_id, content) VALUES (?, ?, ?)";
+    if (mysql_stmt_prepare(stmt, sql, strlen(sql)))
+    {
+        LOG_ERROR("mysql_stmt_prepare: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return;
+    }
+
+    // 绑定三个参数
+    MYSQL_BIND bind[3];
+    memset(bind, 0, sizeof(bind));
+
+    // 参数1：room_id（整数）
+    uint32_t room_id_val = room_id;
+    bind[0].buffer_type = MYSQL_TYPE_LONG;
+    bind[0].buffer = &room_id_val;
+    bind[0].buffer_length = sizeof(room_id_val);
+
+    // 参数2：user_id（整数）
+    uint32_t user_id_val = session->getUserId();
+    bind[1].buffer_type = MYSQL_TYPE_LONG;
+    bind[1].buffer = &user_id_val;
+    bind[1].buffer_length = sizeof(user_id_val);
+
+    // 参数3：content（字符串）
+    unsigned long content_len = msg.payload_.length();
+    bind[2].buffer_type = MYSQL_TYPE_STRING;
+    bind[2].buffer = (void*)msg.payload_.c_str();
+    bind[2].buffer_length = content_len;
+    bind[2].length = &content_len;
+
+    if (mysql_stmt_bind_param(stmt, bind))
+    {
+        LOG_ERROR("mysql_stmt_bind_param: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return;
+    }
+
+    if (mysql_stmt_execute(stmt))
+    {
+        LOG_ERROR("mysql_stmt_execute: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return;
+    }
+    
+    mysql_stmt_close(stmt);
+
 }
 
 void ChatService::handleHearbeat(std::shared_ptr<Connection> conn, const MyMessage & msg)
@@ -313,6 +660,17 @@ std::shared_ptr<Session> ChatService::getSessionByFd(int fd)
     return nullptr;
 }
 
+void ChatService::checkAndRemoveEmptyRoom(uint32_t room_id)
+{
+    std::lock_guard<std::mutex> lock(rooms_mutex_);
+    auto it = rooms_.find(room_id);
+    if (it != rooms_.end() && it->second->memberCount() == 0) {
+        rooms_.erase(it);
+        LOG_INFO("Room " + std::to_string(room_id) + " removed (empty)");
+    }
+}
+
+
 void ChatService::onConnectionClosed(int fd) 
 {
     std::shared_ptr<Session> session;
@@ -326,15 +684,123 @@ void ChatService::onConnectionClosed(int fd)
         }
     }
 
-    if (session && session->getRoomId() != 0) 
+    // 先保存房间ID，后面广播用
+    uint32_t leftRoomId = 0;
+
+    if (session)
     {
+        Metrics::active_connections--;   // ← 登录过的连接关闭就减
+
+        // 清理 Redis 在线状态
+        auto redisConn = redisPool_->getConnection();
+       
+        if (redisConn) 
         {
-            std::lock_guard<std::mutex> lock(rooms_mutex_);
-            auto it = rooms_.find(session->getRoomId());
-            if (it != rooms_.end()) 
+            redisContext* redis = redisConn.get();
+            redisReply* reply = (redisReply*)redisCommand(redis, "DEL user:%d:online", session->getUserId());
+            if (reply == nullptr) 
             {
-                it -> second -> removeMember(session);
+                LOG_ERROR("Redis DEL online failed: " + std::string(redis->errstr));
+            } 
+            else 
+            {   
+                freeReplyObject(reply);
             }
         }
+        else 
+        {
+            LOG_WARN("Redis unavailable, skip DEL online");
+        }
+
+        // 如果用户在房间中，则离开房间
+        if (session->getRoomId() != 0) 
+        {
+            leftRoomId = session->getRoomId();
+
+            // 在锁内移除成员
+            {
+                std::lock_guard<std::mutex> lock(rooms_mutex_);
+                auto it = rooms_.find(leftRoomId);
+                if (it != rooms_.end()) 
+                {
+                    it->second->removeMember(session);
+                }
+            }
+
+            // 锁已经释放，在这里广播人数变化
+            broadcastMemberCount(leftRoomId);
+
+            checkAndRemoveEmptyRoom(leftRoomId);
+        }
     }
+}
+
+void ChatService::printMetrics()
+{
+    LOG_INFO("===== Metrics =====");
+    LOG_INFO("total_connections: " + std::to_string(Metrics::total_connections.load()));
+    LOG_INFO("active_connections: " + std::to_string(Metrics::active_connections.load()));
+    LOG_INFO("total_requests: " + std::to_string(Metrics::total_requests.load()));
+    LOG_INFO("error_requests: " + std::to_string(Metrics::error_requests.load()));
+    LOG_INFO("bytes_read: " + std::to_string(Metrics::bytes_read.load()));
+    LOG_INFO("bytes_written: " + std::to_string(Metrics::bytes_written.load()));
+}
+
+void ChatService::heartbeatLoop()
+{
+    while (!heartbeat_stop_) 
+    {
+        // 可中断睡眠：每 100ms 检查一次退出标志
+        for (int i = 0; i < HEARTBEAT_CHECK_INTERVAL_SEC * 10 && !heartbeat_stop_; ++i) 
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (heartbeat_stop_) break;
+
+        time_t now = time(nullptr);
+
+        // 第一步：加锁，快照所有超时的 Session
+        std::vector<std::shared_ptr<Session>> timeout_sessions;
+        {
+            std::lock_guard<std::mutex> lock(sessions_mutex_);
+            for (auto& [fd, session] : sessions_) 
+            {
+                if (now - session->getActiveTime() > HEARTBEAT_TIMEOUT_SEC) 
+                {
+                    timeout_sessions.push_back(session);
+                }
+            }
+        }
+
+        // 第二步：在锁外关闭这些 Session
+        for (auto& session : timeout_sessions) 
+        {
+            LOG_INFO("Session timeout, closing...");
+            session->close();   // 内部通过 runInLoop 投递到 EventLoop 线程
+        }
+    }
+}
+
+void ChatService::broadcastMemberCount(uint32_t room_id)
+{
+    // 获取房间 shared_ptr（内部加锁）
+    std::shared_ptr<Room> room = getRoomById(room_id);
+    if (!room) return;
+
+    // 构造人数更新消息
+    MyMessage updateMsg;
+    updateMsg.type_ = MyType::MEMBER_COUNT_UPDATE;
+    updateMsg.id_ = 0;   // 主动推送无请求ID
+    updateMsg.payload_ = std::to_string(room_id) + "|" + std::to_string(room->memberCount());
+
+    // 广播给房间内所有成员（包括刚加入/离开的成员，客户端会校验）
+    room->broadcast(updateMsg);
+}
+
+std::shared_ptr<Room> ChatService::getRoomById(uint32_t room_id)
+{
+    std::lock_guard<std::mutex> lock(rooms_mutex_);
+    auto it = rooms_.find(room_id);
+    if (it != rooms_.end()) return it->second;
+    return nullptr;
 }

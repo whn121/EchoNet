@@ -1,13 +1,13 @@
-#pragma once
+#ifndef CHATWINDOW_H
+#define CHATWINDOW_H
 
-#include "Protocol/Protocol.h"
-#include <string>
-#include <any>
-#include "Net/Buffer.h"
-#include <netinet/in.h> //二进制转换
+#include <QMainWindow>
+#include <QTcpSocket>
+#include <QTimer>
 
-
-//我的协议格式| 4字节长度 | 2字节类型 | 4字节请求ID | 变长payload |
+namespace Ui {
+class ChatWindow;
+}
 
 enum class MyType : uint16_t
 {
@@ -34,35 +34,38 @@ enum class MyType : uint16_t
     //错误处理
     ERROR_RESP      = 0x0E,  // 服务器 -> 客户端，携带错误码和错误消息
 
-    MEMBER_COUNT_UPDATE = 0x0F   // 服务器 -> 客户端，payload: "room_id|count"
+    MEMBER_COUNT_UPDATE = 0x0F
 
 };
 
-struct MyMessage
+class ChatWindow : public QMainWindow
 {
-    MyType type_;
-    u_int32_t id_;
-    std::string payload_; 
-};
+    Q_OBJECT
 
-class MyProtocol : public Protocol
-{
 public:
-    ParseResult parse (Buffer& bufffer) override; //解析
-    std::string encode (const std::any& message) override; //序列化二进制
-    std::any getMessage() override; //获得最终消息
-    void reset() override; //重置状态
+    explicit ChatWindow(const QString& username, QTcpSocket* socket, QWidget *parent = nullptr);
+    ~ChatWindow();
 
-    std::optional<std::any> getErrorResponse() override; //错误处理
-
-    //满足虚继承参数不变
-    // 辅助编码函数:根据类型和payload生成完整二进制消息
-    static std::string encodeMessage (MyType type, uint32_t id, const std::string& payload);
+private slots:
+    void onCreateRoom();
+    void onJoinRoom();
+    void onLeaveRoom();
+    void onSendMessage();
+    void onReadyRead();
+    void onDisconnected();
+    void sendHeartbeat();
 
 private:
-    MyMessage currentMessage_; // 最新消息
-    bool hasError_ = false;
-    bool shouldSendError_ = false;   // 新增：是否应该发送错误响应
-    std::string errorPayload_;
+    void parsePacket();
+    void sendPacket(MyType type, uint32_t id, const QString& payload);
 
+    Ui::ChatWindow *ui_;
+    QTcpSocket *socket_;
+    QString username_;
+    uint32_t currentRoomId_ = 0;
+    uint32_t requestId_ = 1;
+    QByteArray recvBuf_;
+    QTimer *heartbeatTimer_;
 };
+
+#endif // CHATWINDOW_H

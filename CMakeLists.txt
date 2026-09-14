@@ -25,6 +25,13 @@ add_executable(EchoNet
     src/Session/Session.cpp
     src/ChatService/ChatService.cpp
     src/Protocol/MyProtocol.cpp
+    src/DB/MySQLPool.cpp       
+    src/DB/RedisPool.cpp 
+    src/Logger/AsyncLogger.cpp
+    src/Metrics/Metrics.cpp
+
 )
+
+target_link_libraries(EchoNet PRIVATE mysqlclient hiredis pthread)
 
 target_include_directories(EchoNet PRIVATE ${PROJECT_SOURCE_DIR}/include)

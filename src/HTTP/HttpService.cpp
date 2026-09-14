@@ -1,5 +1,5 @@
 #include "HTTP/HttpService.h"
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
 
 std::string HttpService::memory_;
 std::mutex HttpService::mtx_;

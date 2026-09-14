@@ -2,7 +2,7 @@
 #include "Net/Connection.h"
 #include "HTTP/HttpService.h"
 #include <any>
-#include "Logger/logger.h"
+#include "Logger/AsyncLogger.h"
 #include "Protocol/MyProtocol.h"
 #include "ChatService/ChatService.h"
 
