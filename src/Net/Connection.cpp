@@ -1,6 +1,7 @@
 #include "Net/Connection.h"
 #include "Logger/AsyncLogger.h"
 #include "Metrics/Metrics.h"
+#include <sys/uio.h> //解决buffer一次只能读一块, 减少系统调用
 
 
 // 构造函数：转移 Channel 和 Protocol 的所有权，保存 EventLoop 指针
@@ -16,18 +17,48 @@ Connection::~Connection()
 // ---------- 读事件处理 ----------
 void Connection::read() 
 {
-    char buf[1024] = {};
+    static constexpr size_t EXTRA_BUF_SIZE = 65536;  //用于定义**编译期可确定值、带静态属性的常量**
+    char extrabuf[EXTRA_BUF_SIZE] = {};  //64kb
 
     // 循环读取，直到内核缓冲区没有数据（EAGAIN）或发生错误
     while (true)
     {
-        ssize_t n = recv(afd_, buf, sizeof(buf), 0);  // 非阻塞读取
+        // 保证 Buffer 至少有一些可写空间
+        // 如果 writable == 0，先扩容
+        size_t writable = inBuffer_.writableBytes();
+        if (writable == 0) {
+            inBuffer_.enableWrite(EXTRA_BUF_SIZE);
+            writable = inBuffer_.writableBytes();
+        }
+
+        struct  iovec vec[2];
+        vec[0].iov_base = inBuffer_.beginWrite();
+        vec[0].iov_len  = writable;
+        vec[1].iov_base = extrabuf;
+        vec[1].iov_len  = sizeof(extrabuf);
+
+        ssize_t n = readv(afd_, vec, 2);  // 一次性读两块
 
         if (n > 0) 
         {
-            inBuffer_.bufferAppend(buf, n);   // 追加到输入缓冲区
-            Metrics::bytes_read += n;   
-            //继续循环
+            const size_t bytes = static_cast<size_t>(n);
+
+            if (bytes <= writable)
+            {
+                // 数据全在 Buffer 里
+                inBuffer_.moveWritePtr(bytes);
+            }
+            else
+            {
+                // Buffer 填满，剩余在 extrabuf
+                inBuffer_.moveWritePtr(writable);
+                inBuffer_.bufferAppend(extrabuf, bytes - writable);
+            }
+
+            updateActiveTime();
+            
+            Metrics::bytes_read += bytes;   
+            //继续循环,尝试再读（内核可能有更多数据）
         }
         else if (n == 0)
         {
@@ -56,6 +87,27 @@ void Connection::read()
             Task task;
             task.conn_ = shared_from_this();          // 延长 Connection 生命周期
             task.message_ = protocol_->getMessage();  // 取出解析好的请求消息
+
+            //  解决work知道协议,解耦不彻底的问题 关键,把业务处理封装
+            auto msg = task.message_;
+            auto handler = businessHandler_; //复制一份
+            std::weak_ptr<Connection> weakself = shared_from_this();
+
+            task.run_ = [weakself, msg, handler]() 
+            {
+                auto self = weakself.lock();
+                if (!self) return;
+
+                // 加锁：保证同一连接的消息串行执行
+                std::lock_guard<std::mutex> lock(self->getBusinessMutex());
+
+                if (handler)
+                {
+                    handler (self, msg);
+                }
+
+            };
+
             if (worksumbitcallback_) worksumbitcallback_(task);
             protocol_->reset();  // 重置协议状态，准备解析下一个请求
         } 
@@ -91,7 +143,10 @@ void Connection::write()
         ssize_t n = send(afd_, outBuffer_.peek(), outBuffer_.getreadable(), 0);
         if (n > 0) 
         {
-            outBuffer_.goReadPtr(n);   // 发送成功，移动读指针
+            outBuffer_.moveReadPtr(n);   // 发送成功，移动读指针
+            
+            updateActiveTime();
+            
             Metrics::bytes_written += n; 
         }
         else if (n == 0) 
@@ -180,10 +235,20 @@ void Connection::close()
     });
 }
 
+// 返回距离上次活跃经过的秒数
+    int64_t Connection::idleSeconds() const 
+    {
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<std::chrono::seconds>(now - last_active_).count();
+    }
+
 void Connection::handleClose() 
 {
     if (closing_) return;          // 已经关闭，防止重复
     closing_ = true;
+
+    LOG_INFO("handleClose: fd=" + std::to_string(afd_));
+
     if (closeCallBack_) 
     {
         closeCallBack_(afd_);

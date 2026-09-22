@@ -11,7 +11,7 @@ public:
     void addMember(std::shared_ptr<Session>);
     void removeMember(std::shared_ptr<Session>);
     void broadcast(const MyMessage& mag); //便利成员列表,调用每个成员的send;
-    size_t memberCount() const;//查询成员数量
+    size_t memberCount() const; //查询成员数量
     void setidname(uint32_t, std::string&);
 
 private:

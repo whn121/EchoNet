@@ -2,6 +2,8 @@
 #include "Net/Connection.h"
 #include "Protocol/HttpProtocol.h"
 #include "ChatService/ChatService.h"
+#include "Logger/AsyncLogger.h"
+
 
 IoThreadPool::IoThreadPool(int num) : num_(num > 0 ? num : 8) 
 {
@@ -39,6 +41,25 @@ void IoThreadPool::submit(int afd)
             conn->init();
             conn->setcloseCallback([loop](int fd) { ChatService::instance().onConnectionClosed(fd); loop->removeConnection(fd); });
             conn->setCallBack(workCallback);
+
+            // 注入业务处理器
+            // 说明：Worker 线程执行 task.run_() 时，会调用这个 handler
+            // handler 负责把 any 里的 MyMessage 取出来，调用 ChatService   
+            conn->setBusinessHandler
+            (
+                [](std::shared_ptr<Connection> c, const std::any& msg) 
+                {
+                    try 
+                    {
+                        auto m = std::any_cast<MyMessage>(msg);
+                        ChatService::instance().handleMessage(c, m);
+                    } 
+                    catch (const std::bad_any_cast& e) 
+                    {
+                        LOG_ERROR("bad_any_cast in business handler: " + std::string(e.what()));
+                    }
+                    }
+            );
 
             loop->updateChannel(conn->getChannel(), EPOLLIN);
             loop->updateConnection(conn);

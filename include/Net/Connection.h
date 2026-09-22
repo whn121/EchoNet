@@ -9,6 +9,8 @@
 #include "ThreadPool/Task.h"
 #include "Protocol/Protocol.h"      // 只依赖抽象协议，不依赖 HTTP
 #include <mutex>
+#include <chrono>
+
 
 
 // 表示一个 TCP 连接，管理读写缓冲区、协议解析、回调投递
@@ -32,6 +34,19 @@ public:
     void close();// 线程安全的关闭方法，可以从任意线程调用
 
     std::mutex& getBusinessMutex() { return business_mutex_; } //解决 同一个连接的消息被多个 Worker 并行处理,不能按顺序处理
+
+    // 业务处理回调：接收连接和解析后的消息，由 Server 层注入
+    // 解决work知道协议,解耦不彻底的问题
+    using BusinessHandler = std::function<void(std::shared_ptr<Connection>, const std::any&)>;
+
+    void setBusinessHandler(BusinessHandler h) { businessHandler_ = std::move(h); }
+
+    // 活跃检测,超时踢人 减少一个额外线程的开销
+    void updateActiveTime() { last_active_ = std::chrono::steady_clock::now(); }
+
+    // 返回距离上次活跃经过的秒数
+    int64_t idleSeconds() const ;
+
     
 private:
     int afd_;                                  // socket 文件描述符
@@ -47,5 +62,10 @@ private:
     void handleClose();      // 统一关闭入口
 
     std::mutex business_mutex_;
+
+    BusinessHandler businessHandler_;  //  解决work知道协议,解耦不彻底的问题 是一个函数指针
+
+    // 活跃检测,超时踢人 减少一个额外线程的开销
+    std::chrono::steady_clock::time_point last_active_{std::chrono::steady_clock::now()};
    
 };

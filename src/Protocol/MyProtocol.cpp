@@ -53,7 +53,7 @@ ParseResult MyProtocol::parse (Buffer& buffer)
     size_t pay_len = body_len - 6;
     currentMessage_.payload_.assign (data + 6, pay_len);
 
-    buffer.goReadPtr (4 + body_len);
+    buffer.moveReadPtr (4 + body_len);
 
     //类型检测
     if (!isValidMsgType(type_val))

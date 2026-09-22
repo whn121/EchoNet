@@ -12,23 +12,29 @@ ChatService::ChatService()
     // 从数据库恢复 next_room_id_
     initIdsFromDatabase();
 
-    // 启动心跳检查线程
-    heartbeat_thread_ = std::thread([this] { heartbeatLoop(); });
+    // 启动异步 DB 写入线程
+    db_writer_thread_ = std::thread([this] { dbWriterLoop(); });
+}
+
+ChatService::~ChatService()
+{
+    // 通知写入线程停止
+    {
+        std::lock_guard<std::mutex> lock(msg_queue_mutex_);
+        db_writer_stop_ = true;
+    }
+    msg_queue_cv_.notify_all();
+
+    // 等它处理完队列剩余消息后退出
+    if (db_writer_thread_.joinable()) {
+        db_writer_thread_.join();
+    }
 }
 
 ChatService& ChatService::instance()
 {
     static ChatService service;
     return service;
-}
-
-ChatService::~ChatService()
-{
-    heartbeat_stop_ = true;
-    if (heartbeat_thread_.joinable()) 
-    {
-        heartbeat_thread_.join();
-    }
 }
 
 void ChatService::handleMessage (std::shared_ptr<Connection> conn, const MyMessage& msg)
@@ -562,80 +568,13 @@ void ChatService::handleSendMessage(std::shared_ptr<Connection> conn, const MyMe
     resp.payload_ = "OK";
     conn->sendResponse(resp);
 
-    // 插入 messages 表
-    auto mysqlConn = mysqlPool_->getConnection();
-    if (!mysqlConn)
-    {
-        LOG_ERROR("Failed to get MySQL connection");
-        return; // 消息已广播，持久化失败不影响业务
-    }
-
-    MYSQL* raw = mysqlConn.get();
-
-    MYSQL_STMT* stmt = mysql_stmt_init(raw);
-    if (!stmt)
-    {
-        LOG_ERROR("mysql_stmt_init failed");
-        return;
-    }
-
-    const char* sql = "INSERT INTO messages (room_id, user_id, content) VALUES (?, ?, ?)";
-    if (mysql_stmt_prepare(stmt, sql, strlen(sql)))
-    {
-        LOG_ERROR("mysql_stmt_prepare: " + std::string(mysql_stmt_error(stmt)));
-        mysql_stmt_close(stmt);
-        return;
-    }
-
-    // 绑定三个参数
-    MYSQL_BIND bind[3];
-    memset(bind, 0, sizeof(bind));
-
-    // 参数1：room_id（整数）
-    uint32_t room_id_val = room_id;
-    bind[0].buffer_type = MYSQL_TYPE_LONG;
-    bind[0].buffer = &room_id_val;
-    bind[0].buffer_length = sizeof(room_id_val);
-
-    // 参数2：user_id（整数）
-    uint32_t user_id_val = session->getUserId();
-    bind[1].buffer_type = MYSQL_TYPE_LONG;
-    bind[1].buffer = &user_id_val;
-    bind[1].buffer_length = sizeof(user_id_val);
-
-    // 参数3：content（字符串）
-    unsigned long content_len = msg.payload_.length();
-    bind[2].buffer_type = MYSQL_TYPE_STRING;
-    bind[2].buffer = (void*)msg.payload_.c_str();
-    bind[2].buffer_length = content_len;
-    bind[2].length = &content_len;
-
-    if (mysql_stmt_bind_param(stmt, bind))
-    {
-        LOG_ERROR("mysql_stmt_bind_param: " + std::string(mysql_stmt_error(stmt)));
-        mysql_stmt_close(stmt);
-        return;
-    }
-
-    if (mysql_stmt_execute(stmt))
-    {
-        LOG_ERROR("mysql_stmt_execute: " + std::string(mysql_stmt_error(stmt)));
-        mysql_stmt_close(stmt);
-        return;
-    }
-    
-    mysql_stmt_close(stmt);
+    // 异步持久化：入队，不阻塞
+    enqueueMessage(room_id, session->getUserId(), msg.payload_);
 
 }
 
 void ChatService::handleHearbeat(std::shared_ptr<Connection> conn, const MyMessage & msg)
 {
-    auto session = getSessionByConn(conn);
-    if (session) 
-    {
-        session->updateActiveTime();
-    }
-
     MyMessage resp;
     resp.type_ = MyType::HEARTBEAT_RESP;
     resp.id_ = msg.id_;
@@ -763,8 +702,145 @@ void ChatService::initIdsFromDatabase()
     mysql_free_result(res);
 }
 
+void ChatService::dbWriterLoop()
+{
+    std::vector<MessageRecord> batch;
+    batch.reserve(BATCH_MAX_SIZE);
+
+    while (true)
+    {
+        std::unique_lock<std::mutex> lock(msg_queue_mutex_);
+
+        // 等待：队列非空或停止
+        msg_queue_cv_.wait_for(lock, std::chrono::milliseconds(BATCH_INTERVAL_MS),
+                               [this] { return !msg_queue_.empty() || db_writer_stop_; });
+
+        // 取一批（最多 BATCH_MAX_SIZE 条）
+        while (!msg_queue_.empty() && batch.size() < BATCH_MAX_SIZE) 
+        {
+            batch.push_back(std::move(msg_queue_.front()));
+            msg_queue_.pop();
+        }
+
+        // 判断是否可以退出
+        bool should_exit = db_writer_stop_ && msg_queue_.empty() && batch.empty();
+
+        lock.unlock();
+
+        if (!batch.empty()) 
+        {
+            batchInsertMessages(batch);
+            batch.clear();
+        }
+
+        if (should_exit) break;
+    }
+
+    LOG_INFO("DB writer thread exit, dropped_messages=" + std::to_string(dropped_messages_.load()));
+}
+
+bool ChatService::batchInsertMessages(std::vector<MessageRecord> &batch)
+{
+    if (batch.empty()) return true;
+
+    auto mysqlConn = mysqlPool_->getConnection();
+    if (!mysqlConn) 
+    {
+        LOG_ERROR("MySQL unavailable, dropping " + std::to_string(batch.size()) + " messages");
+        return false;
+    }
+
+    MYSQL* raw = mysqlConn.get();
+
+    // 构造批量 INSERT SQL
+    std::string sql = "INSERT INTO messages (room_id, user_id, content) VALUES ";
+    for (size_t i = 0; i < batch.size(); ++i) 
+    {
+        if (i > 0) sql += ",";
+        sql += "(?,?,?)";
+    }
+
+    MYSQL_STMT* stmt = mysql_stmt_init(raw);
+    if (!stmt) 
+    {
+        LOG_ERROR("mysql_stmt_init failed");
+        return false;
+    }
+
+    if (mysql_stmt_prepare(stmt, sql.c_str(), sql.size())) 
+    {
+        LOG_ERROR("prepare: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    // 绑定 N*3 个参数
+    size_t n = batch.size();
+    std::vector<MYSQL_BIND> binds(n * 3);
+    std::memset(binds.data(), 0, binds.size() * sizeof(MYSQL_BIND));
+
+    // 中间变量必须在 execute 前一直有效
+    std::vector<uint32_t>      room_ids(n);
+    std::vector<uint32_t>      user_ids(n);
+    std::vector<unsigned long> content_lens(n);
+
+    for (size_t i = 0; i < n; ++i) 
+    {
+        room_ids[i] = batch[i].room_id;
+        user_ids[i] = batch[i].user_id;
+        content_lens[i] = batch[i].content.size();
+
+        binds[i*3+0].buffer_type   = MYSQL_TYPE_LONG;
+        binds[i*3+0].buffer        = &room_ids[i];
+        binds[i*3+0].buffer_length = sizeof(uint32_t);
+
+        binds[i*3+1].buffer_type   = MYSQL_TYPE_LONG;
+        binds[i*3+1].buffer        = &user_ids[i];
+        binds[i*3+1].buffer_length = sizeof(uint32_t);
+
+        binds[i*3+2].buffer_type   = MYSQL_TYPE_STRING;
+        binds[i*3+2].buffer        = (void*)batch[i].content.data();
+        binds[i*3+2].buffer_length = content_lens[i];
+        binds[i*3+2].length        = &content_lens[i];
+    }
+
+    if (mysql_stmt_bind_param(stmt, binds.data())) 
+    {
+        LOG_ERROR("bind_param: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    if (mysql_stmt_execute(stmt)) 
+    {
+        LOG_ERROR("execute: " + std::string(mysql_stmt_error(stmt)));
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    mysql_stmt_close(stmt);
+    return true;
+}
+
+void ChatService::enqueueMessage(uint32_t room_id, uint32_t user_id, const std::string &content)
+{
+    {
+        std::lock_guard<std::mutex> lock(msg_queue_mutex_);
+        if (msg_queue_.size() >= MAX_QUEUE_SIZE) 
+        {
+            dropped_messages_++;
+            LOG_WARN("Message queue full (" + std::to_string(msg_queue_.size()) + "), dropping message");
+            return;
+        }
+        msg_queue_.push({room_id, user_id, content});
+    }
+    msg_queue_cv_.notify_one();
+}
+
 void ChatService::onConnectionClosed(int fd) 
 {
+    LOG_INFO("onConnectionClosed: fd=" + std::to_string(fd));
+
     std::shared_ptr<Session> session;
     {
         std::lock_guard<std::mutex> lock(sessions_mutex_);
@@ -836,41 +912,6 @@ void ChatService::printMetrics()
     LOG_INFO("error_requests: " + std::to_string(Metrics::error_requests.load()));
     LOG_INFO("bytes_read: " + std::to_string(Metrics::bytes_read.load()));
     LOG_INFO("bytes_written: " + std::to_string(Metrics::bytes_written.load()));
-}
-
-void ChatService::heartbeatLoop()
-{
-    while (!heartbeat_stop_) 
-    {
-        // 可中断睡眠：每 100ms 检查一次退出标志
-        for (int i = 0; i < HEARTBEAT_CHECK_INTERVAL_SEC * 10 && !heartbeat_stop_; ++i) 
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-        if (heartbeat_stop_) break;
-
-        time_t now = time(nullptr);
-
-        // 第一步：加锁，快照所有超时的 Session
-        std::vector<std::shared_ptr<Session>> timeout_sessions;
-        {
-            std::lock_guard<std::mutex> lock(sessions_mutex_);
-            for (auto& [fd, session] : sessions_) 
-            {
-                if (now - session->getActiveTime() > HEARTBEAT_TIMEOUT_SEC) 
-                {
-                    timeout_sessions.push_back(session);
-                }
-            }
-        }
-
-        // 第二步：在锁外关闭这些 Session
-        for (auto& session : timeout_sessions) 
-        {
-            LOG_INFO("Session timeout, closing...");
-            session->close();   // 内部通过 runInLoop 投递到 EventLoop 线程
-        }
-    }
 }
 
 void ChatService::broadcastMemberCount(uint32_t room_id)

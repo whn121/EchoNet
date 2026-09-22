@@ -205,7 +205,7 @@ ParseResult HttpContext::parse(Buffer& buffer, HttpRequest& httprequest)
     // 移动 Buffer 的读指针，丢弃已解析的数据（释放缓冲区空间）
     if (consumed > 0)
     {
-        buffer.goReadPtr(consumed);
+        buffer.moveReadPtr(consumed);
     }
 
     // 判断最终状态：如果是 DONE，表示成功解析完一个请求

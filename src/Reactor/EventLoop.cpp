@@ -3,6 +3,8 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 #include "Logger/AsyncLogger.h"
+#include <sys/timerfd.h>
+
 
 
 EventLoop::EventLoop() : owner_thread_id_ (std::this_thread::get_id())
@@ -16,12 +18,17 @@ EventLoop::EventLoop() : owner_thread_id_ (std::this_thread::get_id())
     ev.events = EPOLLIN;
     ev.data.fd = wakeup_fd_;
     epoll_ctl(efd_, EPOLL_CTL_ADD, wakeup_fd_, &ev);
+
+    // 每 5 秒扫描一次，检查超过 60 秒无活动的连接
+    setTimer(5, [this] { checkIdleConnections(60);});
 }
 
 EventLoop::~EventLoop() 
 {
     if (efd_ != -1) close(efd_);
     if (wakeup_fd_ != -1) close(wakeup_fd_);
+    if (timerChannel_) removeChannel(timerChannel_.get());
+    if (timerfd_ != -1) ::close(timerfd_);
 }
 
 void EventLoop::loop() 
@@ -204,6 +211,93 @@ void EventLoop::assertInLoopThread() const
     {
         LOG_ERROR("EventLoop method called from wrong thread!");
         abort();   // 直接终止，因为继续执行会导致数据竞争
+    }
+}
+
+void EventLoop::setTimer(int interval_sec, std::function<void()> cb)
+{
+    timerCallback_ = std::move(cb);
+
+    //创建timerfd
+    timerfd_ = ::timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (timerfd_ < 0)
+    {
+        LOG_ERROR("timerfd_create failed: " + std::string(strerror(errno)));
+        return; 
+    }
+
+    //设置周期：首次 interval_sec 后触发，之后每 interval_sec 触发一次
+    struct itimerspec its {};
+    its.it_value.tv_sec = interval_sec;
+    its.it_interval.tv_sec = interval_sec;
+
+    if (::timerfd_settime(timerfd_, 0, &its, nullptr) < 0)
+    {
+        LOG_ERROR("timerfd_settime failed: " + std::string(strerror(errno)));
+        ::close(timerfd_);
+        timerfd_ = -1;
+        return;
+    }
+
+    // 创建 Channel, 注册读事件
+    timerChannel_ = std::make_unique<Channel> (timerfd_);
+    timerChannel_->setreadCallBack ([this] { handleTimer(); });
+    updateChannel (timerChannel_.get(), EPOLLIN);
+
+    LOG_INFO("Timer set to " + std::to_string(interval_sec) + "s interval");
+
+}
+
+void EventLoop::handleTimer()
+{
+    // 必须读出到期次数，否则 timerfd 一直可读
+    // 内核维护,要么读8字节,要不没读
+    uint64_t expirations = 0;
+    ssize_t n = ::read(timerfd_, &expirations, sizeof(expirations));
+    if (n != sizeof(expirations))
+    {
+        LOG_WARN("timerfd read failed");
+        return;
+    }
+
+    // 执行用户回调
+    if (timerCallback_) {
+        timerCallback_();
+    }
+
+}
+
+void EventLoop::checkIdleConnections(int timeout_sec)
+{
+    assertInLoopThread();   // 只在所属线程执行
+    
+    std::vector<int> timeout_fds;
+    timeout_fds.reserve(16);
+    
+    for (const auto& [fd, conn] : connections_) 
+    {
+        if (conn->idleSeconds() > timeout_sec) 
+        {
+            timeout_fds.push_back(fd);
+        }
+    }
+    
+    if (timeout_fds.empty()) return;
+    
+    LOG_INFO("Timeout scan: " + std::to_string(timeout_fds.size()) 
+             + " connections idle for more than " 
+             + std::to_string(timeout_sec) + "s");
+    
+    for (int fd : timeout_fds)
+    {
+        // 关键：不能直接 erase，要走统一关闭流程
+        auto it = connections_.find(fd);
+        if (it == connections_.end()) continue;
+        
+        auto conn = it->second;
+        // handleClose 是幂等的，内部会触发 closeCallback
+        // closeCallback 里会调 onConnectionClosed + removeConnection
+        conn->close();   // 线程安全（内部 runInLoop）
     }
 }
 

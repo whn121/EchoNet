@@ -42,3 +42,6 @@ text_eventloop
 # python缓存
 __pycache__/
 *.pyc
+
+# 压测客户端编译产物
+bench_cpp

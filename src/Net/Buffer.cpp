@@ -46,12 +46,12 @@ void Buffer::enableWrite(size_t len)
 }
 
 size_t Buffer::getreadable() const { return write_ptr_ - read_ptr_; }
-void Buffer::goReadPtr(size_t len) 
+void Buffer::moveReadPtr(size_t len) 
 { 
     assert (len <= write_ptr_ - read_ptr_); //确保不超过可读字节数
     read_ptr_ += len; 
 }
-void Buffer::goWritePtr(size_t len) 
+void Buffer::moveWritePtr(size_t len) 
 {
     assert (len <= buffer_.size() - write_ptr_); // 确保不超过剩余可写空间
     write_ptr_ += len; 

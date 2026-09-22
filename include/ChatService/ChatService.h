@@ -6,6 +6,8 @@
 #include "DB/MySQLPool.h"
 #include "DB/RedisPool.h"
 #include "Metrics/Metrics.h"
+#include <queue>
+#include <condition_variable>
 
 
 class ChatService
@@ -31,15 +33,6 @@ private:
     void handleLeaveRoom(std::shared_ptr<Connection>, const MyMessage&); //离开房间
     void handleSendMessage(std::shared_ptr<Connection>, const MyMessage&); //发消息
     void handleHearbeat(std::shared_ptr<Connection>, const MyMessage&); //心跳
-    
-    std::thread heartbeat_thread_; //监听线程
-    std::atomic<bool> heartbeat_stop_{false};
-
-    
-    void heartbeatLoop(); //监听心跳
-
-    static constexpr int HEARTBEAT_TIMEOUT_SEC = 60;         // 60秒无心跳则踢
-    static constexpr int HEARTBEAT_CHECK_INTERVAL_SEC = 30;  // 每30秒检查一次
 
     void broadcastMemberCount(uint32_t room_id); //回拨人数给客户端
     std::shared_ptr<Room> getRoomById(uint32_t room_id);
@@ -60,6 +53,29 @@ private:
 
     void checkAndRemoveEmptyRoom(uint32_t room_id); //辅助空房间清理
 
-    void initIdsFromDatabase(); //启东市回复id
+    void initIdsFromDatabase(); //启动时回复id
+
+    // 异步 DB 写入
+    struct MessageRecord 
+    {
+        uint32_t room_id;
+        uint32_t user_id;
+        std::string content;
+    };
+
+    std::queue<MessageRecord> msg_queue_;
+    std::mutex msg_queue_mutex_;    
+    std::condition_variable msg_queue_cv_;
+    std::thread db_writer_thread_;
+    std::atomic<bool> db_writer_stop_{false};
+    std::atomic<uint64_t> dropped_messages_{0};
+
+    static constexpr size_t MAX_QUEUE_SIZE = 500000;   // 队列上限，防 OOM
+    static constexpr int    BATCH_INTERVAL_MS = 100;   // 批量刷盘间隔
+    static constexpr size_t BATCH_MAX_SIZE = 2000;      // 单批最大条数
+
+    void dbWriterLoop();
+    bool batchInsertMessages(std::vector<MessageRecord>& batch);
+    void enqueueMessage(uint32_t room_id, uint32_t user_id, const std::string& content);
 
 };

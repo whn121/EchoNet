@@ -31,6 +31,9 @@ public:
 
     bool isInLoopThread () const; //判断是否在所属线程
     void assertInLoopThread () const; //断言当前线程是否为所属线程
+
+    // 超时检测,减少一个线程的开销,每次io都记录时间在connection里
+    void setTimer(int interval_sec, std::function<void()> cb);
     
 private:
     int efd_;                             // epoll实例
@@ -50,5 +53,12 @@ private:
     std::vector<std::shared_ptr<Connection>> pendingConnections_;
 
     std::thread::id owner_thread_id_; //所属线程ID
+
+    int timerfd_ = -1; //liunx专门用来计时的,内部有计数每次到时间+1 , >0就可读
+    std::unique_ptr<Channel> timerChannel_;
+    std::function<void()> timerCallback_;
+
+    void handleTimer();
+    void checkIdleConnections(int timeout_sec);
 
 };
