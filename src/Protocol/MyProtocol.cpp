@@ -1,70 +1,88 @@
 #include "Protocol/MyProtocol.h"
 #include <netinet/in.h>
+#include "Logger/AsyncLogger.h"
 
 
 //| 4字节长度(网络字节序) | 2字节类型 | 4字节请求ID | 变长payload |
 
-ParseResult MyProtocol::parse (Buffer& buffer)
+ParseResult MyProtocol::parse(Buffer& buf)
 {
-    const char* data = buffer.peek();
-    size_t len = buffer.getreadable();
+    // 最小消息长度：4 + 2 + 4 = 10 字节
+    static constexpr size_t MIN_MSG_SIZE = 10;
+    static constexpr uint32_t MAX_BODY_SIZE = 16 * 1024 * 1024;  // 16MB
 
-    if (len < 4)
+    // 第一步：读 4 字节 body_len
+    if (buf.getreadable() < 4) 
     {
         return ParseResult::NEED_MORE;
     }
 
-    uint32_t net_body_len;
-    memcpy (&net_body_len, data, 4);//原样一次字节拷贝,按第一个参数类型规则解读
-    uint32_t body_len = ntohl (net_body_len);
+    uint32_t body_len = 0;
+    std::memcpy(&body_len, buf.peek(), 4);
+    body_len = ntohl(body_len);
 
-    //边界检测防止传一个小的数
+    // 关键：body_len 上限检查，防止恶意超大包
+    if (body_len > MAX_BODY_SIZE) 
+    {
+        LOG_ERROR("MyProtocol: body_len too large: " + std::to_string(body_len));
+        // 协议错误：直接关连接，不返回错误响应
+        return ParseResult::ERROR;
+    }
+
+    // body 至少要有 type(2) + id(4)
     if (body_len < 6) 
     {
-        hasError_ = true;
-        shouldSendError_ = false;   // 致命错误，直接关连接
-        errorPayload_ = "Invalid body length";
+        LOG_ERROR("MyProtocol: body_len too small: " + std::to_string(body_len));
+        // 协议错误：直接关连接，不返回错误响应
         return ParseResult::ERROR;
     }
 
-    //上限检查防止永远无法满足len >= 4 + body_len一直报错
-    const uint32_t MAX_BODY_LEN = 1024 * 1024;   // 1MB
-    if (body_len > MAX_BODY_LEN) 
+    // 第二步：判断完整包是否到达
+    if (buf.getreadable() < 4 + body_len) 
     {
-        hasError_ = true;
-        shouldSendError_ = false;   // 不发送错误响应
-        errorPayload_ = "Message too large";
-        return ParseResult::ERROR;
+        return ParseResult::NEED_MORE;
     }
 
-    if (len < (4 + body_len)) return ParseResult::NEED_MORE;
-    data += 4;
+    // 第三步：完整包已到，开始解析
+    buf.moveReadPtr(4);  // 跳过 body_len
 
-    uint16_t net_type;
-    memcpy (&net_type, data, 2);
-    uint16_t type_val = ntohs (net_type);
-    currentMessage_.type_ = MyType(type_val);
+    // 读 type(2)
+    uint16_t type_raw = 0;
+    std::memcpy(&type_raw, buf.peek(), 2);
+    type_raw = ntohs(type_raw);
+    buf.moveReadPtr(2);
 
-    uint32_t net_id;
-    memcpy (&net_id, data + 2, 4);
-    uint32_t id = ntohl (net_id);
-    currentMessage_.id_ = id;
+    // 读 id(4)
+    uint32_t id = 0;
+    std::memcpy(&id, buf.peek(), 4);
+    id = ntohl(id);
+    buf.moveReadPtr(4);
 
-    size_t pay_len = body_len - 6;
-    currentMessage_.payload_.assign (data + 6, pay_len);
-
-    buffer.moveReadPtr (4 + body_len);
-
-    //类型检测
-    if (!isValidMsgType(type_val))
+    // 读 payload
+    uint32_t payload_len = body_len - 6;
+    std::string payload;
+    if (payload_len > 0) 
     {
-        hasError_ = true;
-        shouldSendError_ = true;
-        errorPayload_ = "Unknown message type";
+        payload.assign(buf.peek(), payload_len);
+        buf.moveReadPtr(payload_len);
+    }
+
+    // 校验 type 合法性
+    if (!isValidMsgType(type_raw)) 
+    {
+        LOG_ERROR("MyProtocol: invalid message type: " + std::to_string(type_raw));
+        // 协议错误：直接关连接，不返回错误响应
         return ParseResult::ERROR;
     }
 
-    hasError_ = false;
+    MyType type = static_cast<MyType>(type_raw);
+
+    // 填充消息
+    currentMessage_.type_    = type;
+    currentMessage_.id_      = id;
+    currentMessage_.payload_ = std::move(payload);
+
+
     return ParseResult::OK;
 }
 
@@ -126,22 +144,12 @@ std::any MyProtocol::getMessage()
 
 void MyProtocol::reset()
 {
-    hasError_ = false;
-    shouldSendError_ = false;    // 新增
     currentMessage_ = MyMessage();
-    errorPayload_.clear();
 }
 
 std::optional<std::any> MyProtocol::getErrorResponse()
 {
-    if (hasError_ && shouldSendError_)
-    {
-        MyMessage errMsg;
-        errMsg.type_ = MyType::ERROR_RESP;
-        errMsg.id_ = 0;
-        errMsg.payload_ = errorPayload_;
-        return errMsg;
-    }
-    return std::nullopt; //shouldSendError_ = false;   // 不发送错误响应
+    // 协议错误：直接关连接，不返回错误响应
+    return std::nullopt;
 }
 

@@ -1,10 +1,7 @@
 #include "ThreadPool/WorkThreadPool.h"
-#include "Net/Connection.h"
-#include "HTTP/HttpService.h"
-#include <any>
 #include "Logger/AsyncLogger.h"
-#include "Protocol/MyProtocol.h"
-#include "ChatService/ChatService.h"
+
+
 
 WorkThreadPool::WorkThreadPool(int num) : num_(num > 0 ? num : 4) 
 {
@@ -32,7 +29,37 @@ void WorkThreadPool::worker()
             break;
         }
 
-        task.run_();     
+        // 关键：包 try-catch，防止业务抛异常把工作线程弄死
+        try 
+        {
+            task.run_();
+        } 
+        catch (const std::exception& e) 
+        {
+            LOG_ERROR("WorkThreadPool: task.run_ threw: " + std::string(e.what()));
+        } 
+        catch (...) 
+        {
+            LOG_ERROR("WorkThreadPool: task.run_ threw unknown exception");
+        }    
+
+        // onComplete_ 也要保护
+        // 否则 FIFO 链条会断，后续 task 永远不执行
+        if (task.onComplete_) 
+        {
+            try 
+            {
+                task.onComplete_();
+            } 
+            catch (const std::exception& e) 
+            {
+                LOG_ERROR("WorkThreadPool: task.onComplete_ threw: " + std::string(e.what()));
+            } 
+            catch (...) 
+            {
+                LOG_ERROR("WorkThreadPool: task.onComplete_ threw unknown exception");
+            }
+        }
     }
 }
 

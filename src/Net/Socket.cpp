@@ -2,6 +2,8 @@
 #include "Logger/AsyncLogger.h"
 #include <cstring>
 #include <cerrno>    // 新增：errno
+#include <iostream>
+#include <poll.h>
 
 
 Socket::Socket() : fd_(-1), ip_(""), addr{} {}
@@ -65,4 +67,68 @@ void Socket::setNonBlocking() //函数保留防止以后不兼容时使用,我�
     fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
 }
 
-int Socket::getFd() const { return fd_; }
+bool Socket::parseAddr(const std::string& host, uint16_t port)
+{
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+
+    // 支持ipv4
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0)
+    {
+        std::cerr << "inet_pton failed: " << host << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool Socket::m_connect(const std::string& host, uint16_t port)
+{
+    // 1.创建
+    if (!m_init(IP::ipv4, Proto::tcp)) return false;
+
+    // 2.解析
+    if(!parseAddr(host, port)) return false;
+
+    // 3.主动连接
+    int ret = ::connect(fd_, reinterpret_cast<sockaddr*> (&addr), sizeof(addr));
+
+    // EINPROGRESS 是正常状态，不是错误
+    if (ret < 0 && errno != EINPROGRESS)
+    {
+        std::cerr << "connect failed to " << host << ":" << port << " errno=" << errno << " (" << strerror(errno) << ")" << std::endl;
+        return false;
+    }
+
+    // 4.如果是EINPROGRESS, 用poll等待链接完成
+    if (ret < 0)
+    {
+        pollfd pfd{};
+        pfd.fd = fd_;
+        pfd.events = POLLOUT;
+
+        int n = ::poll(&pfd, 1, 3000); //最多等三秒
+        if (n <= 0)
+        {
+            std::cerr << "connect timeout to " << host << ":" << port << std::endl;
+            return false;
+        }
+
+        // 检查 SO_ERROR
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0)
+        {
+            std::cerr << "connect SO_ERROR=" << err << std::endl;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+int Socket::release()
+{
+    int fd = fd_;
+    fd_ = -1;   // 让析构不 close
+    return fd;
+}

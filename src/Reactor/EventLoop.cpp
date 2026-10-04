@@ -23,20 +23,52 @@ EventLoop::EventLoop() : owner_thread_id_ (std::this_thread::get_id())
     setTimer(5, [this] { checkIdleConnections(60);});
 }
 
-EventLoop::~EventLoop() 
+EventLoop::~EventLoop()
 {
-    if (efd_ != -1) close(efd_);
-    if (wakeup_fd_ != -1) close(wakeup_fd_);
-    if (timerChannel_) removeChannel(timerChannel_.get());
-    if (timerfd_ != -1) ::close(timerfd_);
+    // timerChannel_ 的注销依赖 efd_，
+    // 所以必须在关闭 efd_ 之前执行。
+    if (timerChannel_)
+    {
+        removeChannel(timerChannel_.get());
+        timerChannel_.reset();
+    }
+
+    // timerChannel 已经从 epoll 中移除，
+    // 现在可以关闭 timerfd。
+    if (timerfd_ != -1)
+    {
+        ::close(timerfd_);
+        timerfd_ = -1;
+    }
+
+    // wakeup_fd_ 已经不再需要。
+    if (wakeup_fd_ != -1)
+    {
+        ::close(wakeup_fd_);
+        wakeup_fd_ = -1;
+    }
+
+    // 最后关闭 epoll 实例。
+    if (efd_ != -1)
+    {
+        ::close(efd_);
+        efd_ = -1;
+    }
 }
 
 void EventLoop::loop() 
 {
     owner_thread_id_ = std::this_thread::get_id();   // 记录实际运行 loop 的线程
     
+    // 上一轮待销毁的连接，放在这里析构
+    // 避免 pendingConnections_.clear() 一次性析构所有 shared_ptr 造成 IO 线程卡顿
+    std::vector<std::shared_ptr<Connection>> garbage;
+
     while (!stop_) 
     {
+        // 上一轮的 garbage 在这里析构
+        garbage.clear();
+
         // 阻塞等待事件，-1表示无限等待
         int n = epoll_wait(efd_, events_.data(), events_.size(), -1);
         if (n < 0)
@@ -48,6 +80,15 @@ void EventLoop::loop()
             LOG_ERROR("epoll_wait failed: " + std::string(strerror(errno)));
             break;
         }
+
+        // 关键：如果事件数达到上限，下次扩容
+        // 防止 events_ 固定 1024 导致高并发时每次唤醒只处理 1024 个事件
+        if (static_cast<size_t>(n) == events_.size() && events_.size() < 65536) 
+        {
+            events_.resize(events_.size() * 2);
+            LOG_INFO("EventLoop events_ resized to " + std::to_string(events_.size()));
+        }
+
         for (int i = 0; i < n; ++i) 
         {
             int fd = events_[i].data.fd;
@@ -74,8 +115,8 @@ void EventLoop::loop()
             }
         }
 
-        //本次 epoll_wait 返回的所有事件处理完毕，释放待销毁连接
-        pendingConnections_.clear();
+        // 关键：swap 到局部变量，本轮事件处理完后由下一轮开头统一析构
+        garbage.swap(pendingConnections_);
     }
 }
 
@@ -109,25 +150,24 @@ void EventLoop::stop()
 
 void EventLoop::updateChannel(Channel* ch, uint32_t events) 
 {
-    assertInLoopThread();   // 确保在所属线程
+    assertInLoopThread();
 
     epoll_event ev{};
-    ev.events = events;
-    ev.data.fd = ch -> getFd();
+    // 始终监听 EPOLLRDHUP，对端关闭写端时能感知
+    ev.events = events | EPOLLRDHUP;
+    ev.data.fd = ch->getFd();
 
-    //要进行返回值检测
     int ret = epoll_ctl(efd_, EPOLL_CTL_ADD, ch->getFd(), &ev);
     if (ret < 0)
     {
         int saved_errno = errno;
-        std::string log_str = "epoll_ctl ADD failed, fd=" + std::to_string(ch->getFd())
-        + " errno=" + std::to_string(saved_errno)
-        + " (" + std::string(strerror(saved_errno)) + ")";
-        LOG_ERROR(log_str);
-        return ; //失败不加入channels_;
+        LOG_ERROR("epoll_ctl ADD failed, fd=" + std::to_string(ch->getFd())
+                  + " errno=" + std::to_string(saved_errno)
+                  + " (" + std::string(strerror(saved_errno)) + ")");
+        return;
     }
 
-    ch -> setEvents (events);
+    ch->setEvents(events);   // Channel 内部只记录调用者关心的事件
     channels_[ch->getFd()] = ch;
 }
 
@@ -179,30 +219,42 @@ void EventLoop::removeConnection(int fd)
     auto connit = connections_.find (fd);
     if (connit != connections_.end())
     {
-        pendingConnections_.push_back(connit->second);
+        auto conn = connit->second;
+
+        conn->finishClose();
+
+        pendingConnections_.push_back(conn);
+
         connections_.erase(connit);
     }
 }
 
 void EventLoop::updateChannelEvent(Channel* ch, uint32_t events) 
 {
-    assertInLoopThread();   // 确保在所属线程
+    assertInLoopThread();
+
+    //这个优化有bug
+    // 事件没变 → 跳过 epoll_ctl，减少系统调用
+    //if (ch->getEvents() == events) 
+    //{
+    //    return;
+    //}
 
     epoll_event ev{};
-    ev.events = events;
+    ev.events = events | EPOLLRDHUP;
     ev.data.fd = ch->getFd();
 
     int ret = epoll_ctl(efd_, EPOLL_CTL_MOD, ch->getFd(), &ev);
     if (ret < 0)
     {
         int saved_errno = errno;
-        std::string log_str = "epoll_ctl MOD failed, fd=" + std::to_string(ch->getFd())
-        + " errno=" + std::to_string(saved_errno)
-        + " (" + std::string(strerror(saved_errno)) + ")";
-        LOG_ERROR(log_str);
+        LOG_ERROR("epoll_ctl MOD failed, fd=" + std::to_string(ch->getFd())
+                  + " errno=" + std::to_string(saved_errno)
+                  + " (" + std::string(strerror(saved_errno)) + ")");
+        return;
     }
 
-    ch->setEvents(events);  
+    ch->setEvents(events);
 }
 
 void EventLoop::assertInLoopThread() const 

@@ -61,10 +61,9 @@ public:
 
     static bool isValidMsgType(uint16_t t); //判断协议是否正确
 
+    static constexpr uint32_t MAX_BODY_SIZE = 16 * 1024 * 1024;
+
 private:
     MyMessage currentMessage_; // 最新消息
-    bool hasError_ = false;
-    bool shouldSendError_ = false;   // 新增：是否应该发送错误响应
-    std::string errorPayload_;
 
 };

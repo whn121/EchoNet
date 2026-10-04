@@ -11,12 +11,22 @@ Connection::Connection(int afd, std::unique_ptr<Channel> channel, EventLoop* loo
 
 Connection::~Connection() 
 {
-    if (afd_ != -1) ::close(afd_);   // 关闭套接字
+    // 如果 finishClose 已经关过，afd_ == -1，避免重复 close
+    if (afd_ != -1) 
+    {
+        ::close(afd_);
+        afd_ = -1;
+    }
 }
 
 // ---------- 读事件处理 ----------
 void Connection::read() 
 {
+    if(state_ != State::Connected)
+    {
+        return;
+    }
+
     static constexpr size_t EXTRA_BUF_SIZE = 65536;  //用于定义**编译期可确定值、带静态属性的常量**
     char extrabuf[EXTRA_BUF_SIZE] = {};  //64kb
 
@@ -83,6 +93,12 @@ void Connection::read()
 
         if (res == ParseResult::OK) 
         {
+            // 连接已经进入关闭流程，不再接受新的业务请求
+            if (!isConnected())
+            {
+                break;
+            }
+            
             // 解析成功，封装任务投递给业务线程池
             Task task;
             task.conn_ = shared_from_this();          // 延长 Connection 生命周期
@@ -91,15 +107,13 @@ void Connection::read()
             //  解决work知道协议,解耦不彻底的问题 关键,把业务处理封装
             auto msg = task.message_;
             auto handler = businessHandler_; //复制一份
+
             std::weak_ptr<Connection> weakself = shared_from_this();
 
             task.run_ = [weakself, msg, handler]() 
             {
                 auto self = weakself.lock();
                 if (!self) return;
-
-                // 加锁：保证同一连接的消息串行执行
-                std::lock_guard<std::mutex> lock(self->getBusinessMutex());
 
                 if (handler)
                 {
@@ -108,7 +122,15 @@ void Connection::read()
 
             };
 
-            if (worksumbitcallback_) worksumbitcallback_(task);
+            task.onComplete_ = [weakself]()
+            {
+                if (auto self = weakself.lock())
+                {
+                    self->onTaskComplete();
+                }
+            };
+
+            enqueueTask(std::move(task));
             protocol_->reset();  // 重置协议状态，准备解析下一个请求
         } 
         else if (res == ParseResult::ERROR) 
@@ -138,6 +160,11 @@ void Connection::read()
 // ---------- 写事件处理 ----------
 void Connection::write() 
 {
+    if(state_ != State::Connected)
+    {
+        return;
+    }
+
     while (outBuffer_.getreadable() > 0) 
     {
         ssize_t n = send(afd_, outBuffer_.peek(), outBuffer_.getreadable(), 0);
@@ -163,34 +190,39 @@ void Connection::write()
         }
     }
 
-    // 如果发送缓冲区已空，取消写事件监听（不再关注 EPOLLOUT），只关注读
+    // 发送缓冲区已空：取消 EPOLLOUT
+    // 关键：先改 Channel 内存状态，再同步给 epoll
     if (outBuffer_.getreadable() == 0) 
     {
-        loop_->updateChannelEvent(channel_.get(), EPOLLIN);
+        channel_->disableWriting();
+        loop_->updateChannelEvent(channel_.get(), channel_->getEvents());
     }
 }
 
-// ---------- 发送响应 ----------
-// 接收任意类型的响应（any），由协议编码后放入输出缓冲区，并激活写事件
-void Connection::sendResponse(const std::any& response) 
+// 发送响应, 入队列
+void Connection::sendResponse(const std::any& response)
 {
-    //weak_ptr引用,确保执行期间存活,不然如果sendResponse被工作线程调用时,链接可能已经关闭并析构,回调执行时访问this,这时是空指针
     std::weak_ptr<Connection> weakself = shared_from_this();
 
-    // 通过 runInLoop 保证线程安全地修改监听事件，激活 EPOLLOUT,将 outBuffer 追加和 epoll 事件修改打包投递到 I/O 线程执行
-    loop_->runInLoop([weakself, response] 
+    loop_->runInLoop( [weakself,response]
     {
-        auto self = weakself.lock ();
-        if (!self) return;
+        auto self = weakself.lock();
 
-        //编码可以放在当前线程（业务线程），因为 protocol_ 是只读的，不涉及 I/O 状态
-        std::string data = self->protocol_->encode(response);      // 协议编码
+        if(!self) return;
 
-        // 以下操作都在 I/O 线程执行，与 write() 同线程，无并发问题
-        self -> outBuffer_.bufferAppend(data.data(), data.size());   // 放入输出缓冲区
-        self -> loop_->updateChannelEvent(self -> channel_.get(), EPOLLIN | EPOLLOUT);
+        if(!self->isConnected()) return;
+
+        std::string data = self->protocol_->encode(response);
+
+        {
+            std::lock_guard<std::mutex> lock (self->sendMutex_);
+
+            self->sendQueue_.push (std::move(data));
+        }
+
+        self->flushSendQueue();
+
     });
-
 }
 
 Channel* Connection::getChannel() 
@@ -244,13 +276,162 @@ void Connection::close()
 
 void Connection::handleClose() 
 {
-    if (closing_) return;          // 已经关闭，防止重复
-    closing_ = true;
+    // CAS：只有一个线程能从 Connected 进入 Closing
+    State expected = State::Connected;
+    if (!state_.compare_exchange_strong(expected, State::Closing)) 
+    {
+        // 已经被别人关过了，或者已经是 Closing/Closed
+        return;
+    }
 
     LOG_INFO("handleClose: fd=" + std::to_string(afd_));
 
+    // 优雅关闭写端：告诉对端我们不再发数据
+    // 注意：shutdown 不关闭 fd，真正的 close 在 finishClose
+    if (afd_ != -1)
+    {
+        ::shutdown(afd_, SHUT_WR);
+    }
+
+    // 通知 EventLoop / Server 清理
     if (closeCallBack_) 
     {
         closeCallBack_(afd_);
+    }
+
+    // 清空未执行的业务任务
+    {
+        std::lock_guard<std::mutex> lock(taskMutex_);
+        while (!pendingTasks_.empty()) 
+        {
+            pendingTasks_.pop();
+        }
+    }
+
+    // 清空未发送的数据，防止 socket 关了还占内存
+    {
+        std::lock_guard<std::mutex> lock(sendMutex_);
+        while (!sendQueue_.empty()) 
+        {
+            sendQueue_.pop();
+        }
+    }
+}
+
+void Connection::finishClose()
+{
+    if(state_ == State::Closed)
+    {
+        return;
+    }
+
+
+    state_ = State::Closed;
+
+    // 真正关闭 fd，避免 pendingConnections_ 延迟析构期间占着 fd
+    if (afd_ != -1)
+    {
+        ::close(afd_);
+        afd_ = -1;
+    }
+
+    LOG_INFO("finishClose done");
+}
+
+void Connection::enqueueTask(Task task)
+{
+    Task nextTask;
+    bool needSubmit = false;
+
+    {
+        std::lock_guard<std::mutex> lock(taskMutex_);
+
+        pendingTasks_.push(std::move(task));
+
+        if (!taskRunning_)
+        {
+            taskRunning_ = true;
+
+            nextTask = std::move(pendingTasks_.front());
+            pendingTasks_.pop();
+
+            needSubmit = true;
+        }
+    }
+
+    if (needSubmit && worksumbitcallback_)
+    {
+        worksumbitcallback_(std::move(nextTask));
+    }
+}
+
+void Connection::onTaskComplete()
+{
+    Task nextTask;
+    bool needSubmit = false;
+
+    {
+        std::lock_guard<std::mutex> lock(taskMutex_);
+
+        if (pendingTasks_.empty())
+        {
+            // 没有后续任务
+            taskRunning_ = false;
+            return;
+        }
+
+        // FIFO：一定取队头
+        nextTask = std::move(pendingTasks_.front());
+        pendingTasks_.pop();
+
+        // 继续保持 running 状态
+        taskRunning_ = true;
+
+        needSubmit = true;
+    }
+
+    if (needSubmit && worksumbitcallback_)
+    {
+        worksumbitcallback_(std::move(nextTask));
+    }
+}
+
+void Connection::flushSendQueue()
+{
+    if (state_ != State::Connected)
+    {
+        return;
+    }
+
+    std::queue<std::string> temp;
+    {
+        std::lock_guard<std::mutex> lock(sendMutex_);
+        temp.swap(sendQueue_);
+    }
+
+    while (!temp.empty())
+    {
+        auto& msg = temp.front();
+        outBuffer_.bufferAppend(msg.data(), msg.size());
+        temp.pop();
+    }
+
+    // 高水位保护：客户端只读不写，outBuffer_ 会无限增长
+    // 超过阈值直接关闭，避免 OOM
+    if (outBuffer_.getreadable() > HIGH_WATER_MARK)
+    {
+        LOG_WARN("Connection fd=" + std::to_string(afd_) 
+                 + " outBuffer exceeds high water mark: " 
+                 + std::to_string(outBuffer_.getreadable())
+                 + " bytes, closing");
+        handleClose();
+        return;
+    }
+
+    // 有数据待发 → 启用 EPOLLOUT
+    if (outBuffer_.getreadable() > 0)
+    {
+        channel_->enableWriting();
+        loop_->updateChannelEvent(channel_.get(), channel_->getEvents());
     }
 }

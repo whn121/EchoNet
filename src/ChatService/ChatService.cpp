@@ -2,18 +2,61 @@
 #include <sstream>
 #include "Logger/AsyncLogger.h"
 #include "Metrics/Metrics.h"
+#include "RateLimit/TokenBucket.h"
+#include <cstdlib>
+#include "Common/Config.h"
+#include "ServiceRegistry/ServiceInstance.h"
+#include <chrono>
 
 
 ChatService::ChatService()
 {
-    mysqlPool_ = std::make_unique<MySQLPool>("127.0.0.1", "root", "2788138053", "echonet", 4);
-    redisPool_ = std::make_unique<RedisPool>("127.0.0.1", 6379, 4);
+    // 方案 A：纯单机
+    global_limiter_ = std::make_shared<TokenBucket>(5000.0, 10000.0);
+    user_limiter_   = std::make_shared<TokenBucket>(10.0, 20.0);
+
+    // 方案 B：借用 Redis
+    // global_limiter_ = std::make_shared<RedisTokenBucket>(redisPool_, 5000.0, 10000.0);
+    // user_limiter_   = std::make_shared<RedisTokenBucket>(redisPool_, 10.0, 20.0);
+
+    // MySQL：从环境变量读，未设置则用默认值
+    const char* mysql_host = std::getenv("ECHONET_MYSQL_HOST");
+    const char* mysql_user = std::getenv("ECHONET_MYSQL_USER");
+    const char* mysql_pass = std::getenv("ECHONET_MYSQL_PASS");
+    const char* mysql_db   = std::getenv("ECHONET_MYSQL_DB");
+
+    mysqlPool_ = std::make_unique<MySQLPool>(
+        mysql_host ? mysql_host : "127.0.0.1",
+        mysql_user ? mysql_user : "root",
+        mysql_pass ? mysql_pass : "",
+        mysql_db   ? mysql_db   : "echonet",
+        4);
+
+    // Redis：同样从环境变量读
+    const char* redis_host = std::getenv("ECHONET_REDIS_HOST");
+    const char* redis_port = std::getenv("ECHONET_REDIS_PORT");
+
+    redisPool_ = std::make_unique<RedisPool>(
+        redis_host ? redis_host : "127.0.0.1",
+        redis_port ? std::stoi(redis_port) : 6379,
+        4);
 
     // 从数据库恢复 next_room_id_
     initIdsFromDatabase();
 
     // 启动异步 DB 写入线程
     db_writer_thread_ = std::thread([this] { dbWriterLoop(); });
+
+    // 分布式服务注册
+    port_ = Config::instance().port;
+    instance_id_ = "node-" + std::to_string(port_);
+
+    registerToRedis();
+
+    LOG_INFO("Service registered: " + service_name_ + "/" + instance_id_);
+
+    heartbeat_thread_ = std::thread([this] { heartbeatLoop(); });
+
 }
 
 ChatService::~ChatService()
@@ -26,9 +69,18 @@ ChatService::~ChatService()
     msg_queue_cv_.notify_all();
 
     // 等它处理完队列剩余消息后退出
-    if (db_writer_thread_.joinable()) {
+    if (db_writer_thread_.joinable()) 
+    {
         db_writer_thread_.join();
     }
+
+    heartbeat_stop_ = true;
+    if (heartbeat_thread_.joinable()) 
+    {
+        heartbeat_thread_.join();
+    }
+    LOG_INFO("Heartbeat thread stopped");
+
 }
 
 ChatService& ChatService::instance()
@@ -39,6 +91,27 @@ ChatService& ChatService::instance()
 
 void ChatService::handleMessage (std::shared_ptr<Connection> conn, const MyMessage& msg)
 {
+    // 心跳豁免
+    if (msg.type_ != MyType::HEARTBEAT_REQ) {
+        // 第一级：全局
+        if (global_limiter_ && !global_limiter_->tryAcquire("global")) {
+            sendRateLimited(conn, msg);
+            return;
+        }
+
+        // 第二级：用户级
+        auto session = getSessionByConn(conn);
+        const std::string key = session
+            ? "user:" + std::to_string(session->getUserId())
+            : "fd:"   + std::to_string(conn->getChannel()->getFd());
+
+        if (user_limiter_ && !user_limiter_->tryAcquire(key)) {
+            sendRateLimited(conn, msg);
+            return;
+        }
+    }
+
+
     Metrics::total_requests++;   // 每条消息 +1
 
     switch (msg.type_)
@@ -391,7 +464,23 @@ void ChatService::handleJionRoom(std::shared_ptr<Connection> conn, const MyMessa
         conn->sendResponse(resp);
         return;
     }
-    uint32_t room_id = std::stoul (msg.payload_);
+
+    // 关键：stoul 可能抛异常，必须包 try-catch
+    uint32_t room_id = 0;
+    try 
+    {
+        room_id = static_cast<uint32_t>(std::stoul(msg.payload_));
+    } 
+    catch (const std::exception&) 
+    {
+        LOG_WARN("handleJionRoom: invalid room_id payload: " + msg.payload_);
+        MyMessage resp;
+        resp.type_    = MyType::ERROR_RESP;
+        resp.id_      = msg.id_;
+        resp.payload_ = "Invalid room id";
+        conn->sendResponse(resp);
+        return;
+    }
     
     //获得新房间
     std::shared_ptr<Room> target_room;
@@ -841,6 +930,12 @@ void ChatService::onConnectionClosed(int fd)
 {
     LOG_INFO("onConnectionClosed: fd=" + std::to_string(fd));
 
+    // 清 fd 维度的限流桶
+    if (user_limiter_) 
+    {
+        user_limiter_->removeKey("fd:" + std::to_string(fd));
+    }
+
     std::shared_ptr<Session> session;
     {
         std::lock_guard<std::mutex> lock(sessions_mutex_);
@@ -850,6 +945,12 @@ void ChatService::onConnectionClosed(int fd)
             session = it->second;
             sessions_.erase(it);
         }
+    }
+
+    // 关键：session 存在则清 user 维度的限流桶
+    if (session && user_limiter_) 
+    {
+        user_limiter_->removeKey("user:" + std::to_string(session->getUserId()));
     }
 
     // 先保存房间ID，后面广播用
@@ -936,4 +1037,46 @@ std::shared_ptr<Room> ChatService::getRoomById(uint32_t room_id)
     auto it = rooms_.find(room_id);
     if (it != rooms_.end()) return it->second;
     return nullptr;
+}
+
+
+void ChatService::sendRateLimited(std::shared_ptr<Connection> conn, const MyMessage& msg) {
+    Metrics::error_requests++;
+
+    MyMessage resp;
+    resp.type_    = MyType::ERROR_RESP;
+    resp.id_      = msg.id_;
+    resp.payload_ = "RATE_LIMITED";
+    conn->sendResponse(resp);
+}
+
+void ChatService::registerToRedis()
+{
+    auto conn = redisPool_->getConnection();
+    if (!conn) {
+        LOG_WARN("registerToRedis: Redis unavailable");
+        return;
+    }
+
+    std::string key   = "services:" + service_name_ + ":" + instance_id_;
+    std::string value = host_ + ":" + std::to_string(port_);
+
+    redisReply* reply = (redisReply*)redisCommand(
+        conn.get(), "SET %s %s EX 10", key.c_str(), value.c_str()); // EX 10 10秒之后自动过期
+
+    if (reply == nullptr) {
+        LOG_ERROR("registerToRedis failed: " + std::string(conn->errstr));
+    } else {
+        freeReplyObject(reply);
+    }
+}
+
+void ChatService::heartbeatLoop()
+{
+    while (!heartbeat_stop_)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(3)); //等三秒
+        if (heartbeat_stop_) break;
+        registerToRedis();
+    }
 }

@@ -8,22 +8,25 @@
 #include "Metrics/Metrics.h"
 #include <queue>
 #include <condition_variable>
+#include "RateLimit/RateLimiter.h"
 
 
 class ChatService
 {
 public:
-    ChatService();
-    ~ChatService();
-
     static ChatService& instance();  //单例入口
+    ~ChatService();
 
     void handleMessage (std::shared_ptr<Connection> conn, const MyMessage& msg); //入口,根据类型分发
     void onConnectionClosed (int fd); //链接关闭时清理
 
     void printMetrics();//记录观测
 
+    void sendRateLimited(std::shared_ptr<Connection> conn, const MyMessage& msg);
+
 private:
+    ChatService();
+
     ChatService(const ChatService&) = delete;
     ChatService& operator= (const ChatService&) = delete;
 
@@ -77,5 +80,22 @@ private:
     void dbWriterLoop();
     bool batchInsertMessages(std::vector<MessageRecord>& batch);
     void enqueueMessage(uint32_t room_id, uint32_t user_id, const std::string& content);
+
+    std::shared_ptr<RateLimiter> global_limiter_;  // 全局限流
+    std::shared_ptr<RateLimiter> user_limiter_;    // 用户级限流
+
+    //分布式服务注册
+    std::string service_name_ = "chat_service";
+    std::string instance_id_;
+    std::string host_ = "127.0.0.1";
+    uint16_t    port_ = 0;
+
+    void registerToRedis();
+
+    // 后端心跳续租
+    std::thread       heartbeat_thread_;
+    std::atomic<bool> heartbeat_stop_{false};
+
+    void heartbeatLoop();
 
 };

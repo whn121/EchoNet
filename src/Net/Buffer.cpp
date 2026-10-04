@@ -48,8 +48,16 @@ void Buffer::enableWrite(size_t len)
 size_t Buffer::getreadable() const { return write_ptr_ - read_ptr_; }
 void Buffer::moveReadPtr(size_t len) 
 { 
-    assert (len <= write_ptr_ - read_ptr_); //确保不超过可读字节数
-    read_ptr_ += len; 
+    assert(len <= write_ptr_ - read_ptr_);
+    read_ptr_ += len;
+
+    // 关键：读空时归零，让下次写入从头复用 buffer_ 空间
+    // 否则 read_ptr_ 和 write_ptr_ 会一直往后推，buffer_ 只会涨不会缩
+    if (read_ptr_ == write_ptr_) 
+    {
+        read_ptr_  = 0;
+        write_ptr_ = 0;
+    }
 }
 void Buffer::moveWritePtr(size_t len) 
 {

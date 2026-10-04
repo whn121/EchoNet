@@ -160,13 +160,23 @@ def test_protocol_bounds(t):
     sock.close()
 
     # 1.3 未知类型
+    # 策略 A：协议错误直接关连接，不返回 ERROR_RESP
     sock = new_connection()
     packet = struct.pack('>I H I', 6, 0xFFFF, 1)
     sock.sendall(packet)
-    resp = recv_packet(sock, timeout=2)
-    t.check("未知类型返回 ERROR_RESP",
-            resp is not None and resp[0] == ERROR_RESP,
-            f"got: {resp}")
+    sock.settimeout(2)
+    try:
+        data = sock.recv(1024)
+        # 期望：连接被服务器关闭（recv 返回空字节）
+        t.check("未知类型导致连接关闭",
+                data == b"",
+                f"got: {data}")
+    except socket.timeout:
+        # 服务器没关，也没响应 — 不符合策略 A
+        t.check("未知类型导致连接关闭", False, "timeout, server did not close")
+    except Exception as e:
+        # 其他网络异常（如 ConnectionResetError）也视为连接被关
+        t.check("未知类型导致连接关闭", True, f"closed with {type(e).__name__}")
     sock.close()
 
     # 1.4 MEMBER_COUNT_UPDATE 类型被识别为合法

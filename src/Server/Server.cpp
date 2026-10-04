@@ -2,7 +2,7 @@
 #include "Logger/AsyncLogger.h"
 #include "Common/Config.h"
 #include "Common/SignalHandler.h"
-#include "ChatService/ChatService.h"
+
 
 Server::Server()
     : iopool_(Config::instance().io_threads),
@@ -34,6 +34,10 @@ bool Server::start()
 
     // 设置IO线程池的工作回调：将Task投递给业务线程池
     iopool_.setCallBack([this](Task t) { workpool_.submit(std::move(t)); });
+    
+    // 转发业务处理器给 IoThreadPool
+    if (businessHandler_) iopool_.setBusinessHandler(businessHandler_);
+    if (closeCallback_)   iopool_.setCloseCallback(closeCallback_);
 
     // 注册信号处理：收到SIGINT/SIGTERM时停止主循环
     SignalHandler::init([this] { mainloop_.stop(); });
@@ -50,10 +54,19 @@ void Server::stop()
     mainloop_.stop();
     iopool_.stop();
     workpool_.stop();
-    ChatService::instance().printMetrics();   // 新增
 }
 
 void Server::setcreator (std::function<std::shared_ptr<Connection> (int afd, EventLoop* loop)> creator)
 {
     creator_ = creator;
+}
+
+void Server::setBusinessHandler(IoThreadPool::BusinessHandler handler)
+{
+    businessHandler_ = std::move(handler);
+}
+
+void Server::setCloseCallback(std::function<void(int)> cb)
+{
+    closeCallback_ = std::move(cb);
 }

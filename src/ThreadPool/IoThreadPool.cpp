@@ -1,7 +1,6 @@
 #include "ThreadPool/IoThreadPool.h"
 #include "Net/Connection.h"
 #include "Protocol/HttpProtocol.h"
-#include "ChatService/ChatService.h"
 #include "Logger/AsyncLogger.h"
 
 
@@ -39,27 +38,13 @@ void IoThreadPool::submit(int afd)
             auto conn = buildconn_ (afd, loop);
 
             conn->init();
-            conn->setcloseCallback([loop](int fd) { ChatService::instance().onConnectionClosed(fd); loop->removeConnection(fd); });
+            conn->setcloseCallback([this, loop](int fd) { if (closeCallback_) closeCallback_(fd); loop->removeConnection(fd); });;
             conn->setCallBack(workCallback);
 
             // 注入业务处理器
             // 说明：Worker 线程执行 task.run_() 时，会调用这个 handler
             // handler 负责把 any 里的 MyMessage 取出来，调用 ChatService   
-            conn->setBusinessHandler
-            (
-                [](std::shared_ptr<Connection> c, const std::any& msg) 
-                {
-                    try 
-                    {
-                        auto m = std::any_cast<MyMessage>(msg);
-                        ChatService::instance().handleMessage(c, m);
-                    } 
-                    catch (const std::bad_any_cast& e) 
-                    {
-                        LOG_ERROR("bad_any_cast in business handler: " + std::string(e.what()));
-                    }
-                    }
-            );
+            conn->setBusinessHandler (businessHandler_);
 
             loop->updateChannel(conn->getChannel(), EPOLLIN);
             loop->updateConnection(conn);
@@ -88,4 +73,14 @@ std::function<void(Task)> IoThreadPool::getCallback() { return workCallback_; }
 void IoThreadPool::setbuildconn (std::function<std::shared_ptr<Connection> (int afd, EventLoop* loop)> bconn)
 {
     buildconn_ = bconn;
+}
+
+void IoThreadPool::setBusinessHandler(BusinessHandler handler)
+{
+    businessHandler_ = std::move(handler);
+}
+
+void IoThreadPool::setCloseCallback(std::function<void(int)> cb)
+{
+    closeCallback_ = std::move(cb);
 }

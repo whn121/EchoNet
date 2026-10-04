@@ -1,4 +1,5 @@
 #pragma once
+
 #include "Reactor/EventLoop.h"
 #include <vector>
 #include <thread>
@@ -6,6 +7,8 @@
 #include <atomic> //对他的读写,自增,自减,操作是一起的
 #include "Task.h"
 #include <atomic>
+#include <any>
+#include <functional>
 
 
 // IO线程池：管理一组子EventLoop，每个循环运行在独立线程
@@ -21,6 +24,12 @@ public:
 
     void setbuildconn (std::function<std::shared_ptr<Connection> (int afd, EventLoop* loop)>);
 
+    // 业务处理函数类型：框架层不关心里面是什么业务,继续解耦io
+    using BusinessHandler = std::function<void(std::shared_ptr<Connection>, const std::any&)>;
+
+    void setBusinessHandler(BusinessHandler handler);
+    void setCloseCallback(std::function<void(int)> cb);
+
 private:
     void worker(int idx);                              // 线程工作函数
     std::vector<std::unique_ptr<EventLoop>> loops_;    // 子EventLoop
@@ -33,5 +42,9 @@ private:
 
     //为了解耦io不知道协议类型,在acceptor里完成io执行回调
     std::function<std::shared_ptr<Connection> (int afd, EventLoop* loop)> buildconn_;
+
+    // 接着解耦io也不知道
+    BusinessHandler businessHandler_;
+    std::function<void(int)> closeCallback_;
 
 };

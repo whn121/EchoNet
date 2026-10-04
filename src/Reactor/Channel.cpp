@@ -6,14 +6,23 @@ Channel::~Channel() = default;
 
 void Channel::handleEvent(uint32_t events) 
 {
-    // 错误或挂起优先处理
-    if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) 
+    // EPOLLERR / EPOLLHUP 是真正的错误，直接关闭
+    if (events & (EPOLLERR | EPOLLHUP)) 
     {
-        LOG_WARN("Channel error/hup/rdhup on fd=" + std::to_string(fd_) + " events=" + std::to_string(events));
+        LOG_WARN("Channel error/hup on fd=" + std::to_string(fd_) 
+                 + " events=" + std::to_string(events));
         if (closecallback_) closecallback_();
         return;
     }
-    if (events & EPOLLIN)  { if (readcallback_) readcallback_(); }
+
+    // EPOLLRDHUP：对端关闭写端，转成 EPOLLIN，让 read() 读到 0 再走 close
+    // 这样不会丢掉对端在 close 前发的最后一批数据
+    if (events & EPOLLRDHUP) 
+    {
+        events |= EPOLLIN;
+    }
+
+    if (events & EPOLLIN)  { if (readcallback_)  readcallback_();  }
     if (events & EPOLLOUT) { if (writecallback_) writecallback_(); }
 }
 
