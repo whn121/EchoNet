@@ -7,7 +7,7 @@
 
 
 Socket::Socket() : fd_(-1), ip_(""), addr{} {}
-Socket::~Socket() { if (fd_ > 0) close(fd_); }
+Socket::~Socket() { close(); }
 
 bool Socket::m_init(IP ip, Proto proto) 
 {
@@ -131,4 +131,13 @@ int Socket::release()
     int fd = fd_;
     fd_ = -1;   // 让析构不 close
     return fd;
+}
+
+void Socket::close()
+{
+    if (fd_ >= 0)
+    {
+        ::close(fd_);
+        fd_ = -1;
+    }
 }

@@ -23,6 +23,7 @@ public:
     void handleEvent(uint32_t events);              // 事件分发
 
     void enableReading();
+    void disableReading(); // 新增: 取消读事件关注, 配合实现半关闭继续发送
     void enableWriting();
     void disableWriting();
     void disableAll();

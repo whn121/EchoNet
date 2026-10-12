@@ -11,8 +11,9 @@
 #include <functional>
 
 
+
 // IO线程池：管理一组子EventLoop，每个循环运行在独立线程
-class IoThreadPool 
+class IoThreadPool
 {
 public:
     IoThreadPool(int num = 4);
@@ -21,6 +22,14 @@ public:
     void setCallBack(std::function<void(Task)> cb);    // 设置工作线程池回调
     std::function<void(Task)> getCallback();           // 获取回调
     void stop();
+
+    // 在所有 I/O 循环中发起现有连接的关闭流程，并等待关闭请求执行。
+    void closeAllConnections();
+
+    // 等待各 I/O 循环执行调用前已排队的回调。
+    // 应在 WorkThreadPool 停止并 join 后调用。
+    void waitForPendingCallbacks();
+
 
     void setbuildconn (std::function<std::shared_ptr<Connection> (int afd, EventLoop* loop)>);
 

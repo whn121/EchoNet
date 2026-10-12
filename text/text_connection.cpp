@@ -21,7 +21,7 @@ public:
         // 假设一个完整消息就是当前所有数据（实际可自定义边界）
         // 这里简单地把所有可读数据作为一条消息
         std::string msg(buffer.peek(), buffer.getreadable());
-        buffer.goReadPtr(buffer.getreadable());   // 消费全部
+        buffer.moveReadPtr(buffer.getreadable());   // 消费全部
         message_ = msg;
         return ParseResult::OK;
     }

@@ -2,19 +2,26 @@
 #include "Net/Connection.h"
 #include "Protocol/HttpProtocol.h"
 #include "Logger/AsyncLogger.h"
+#include <future>
 
 
 IoThreadPool::IoThreadPool(int num) : num_(num > 0 ? num : 8) 
 {
     // 第二步: 创造所以Eventloop
-    for (int i = 0; i < num; ++i)
+    for (int i = 0; i < num_; ++i)
     {
         loops_.emplace_back(std::make_unique<EventLoop>());
     }
     //第二步: 启动所有工作线程
-    for (int i = 0; i < num; ++i)
+    for (int i = 0; i < num_; ++i)
     {
         threads_.emplace_back([this, i] { worker(i); });
+    }
+
+    // 所有子 EventLoop 都记录了实际运行线程后，构造函数才返回。
+    for (auto& loop : loops_)
+    {
+        loop->waitUntilStarted();
     }
 }
 
@@ -57,6 +64,56 @@ void IoThreadPool::worker(int idx)
 {
     loops_[idx]->loop();   // 启动事件循环（阻塞）
 }
+
+void IoThreadPool::closeAllConnections()
+{
+    std::vector<std::future<void>> futures;
+    futures.reserve(loops_.size());
+
+    // 向每个 EventLoop 投递关闭请求。
+    for (auto& loop : loops_)
+    {
+        auto done = std::make_shared<std::promise<void>>();
+        futures.emplace_back(done->get_future());
+
+        loop->closeAllConnections([done]()
+        {
+            done->set_value();
+        });
+    }
+
+    // 等待所有 EventLoop 都已执行关闭请求。
+    // 此时部分连接仍可能有业务任务正在运行。
+    for (auto& future : futures)
+    {
+        future.wait();
+    }
+}
+
+void IoThreadPool::waitForPendingCallbacks()
+{
+    std::vector<std::future<void>> futures;
+    futures.reserve(loops_.size());
+
+    // 在每个 EventLoop 中投递一个屏障任务。
+    for (auto& loop : loops_)
+    {
+        auto done = std::make_shared<std::promise<void>>();
+        futures.emplace_back(done->get_future());
+
+        loop->runInLoop([done]()
+        {
+            done->set_value();
+        });
+    }
+
+    // 所有屏障都完成后，调用前已排队的回调已处理。
+    for (auto& future : futures)
+    {
+        future.wait();
+    }
+}
+
 
 void IoThreadPool::stop() 
 {

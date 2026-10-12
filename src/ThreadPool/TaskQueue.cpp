@@ -7,6 +7,27 @@ void TaskQueue::push(Task task)
     cv_.notify_one();   // 唤醒一个等待的线程
 }
 
+
+bool TaskQueue::tryPush(Task&& task)
+{
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+
+        // 停止后拒绝新任务，且不移动 task。
+        if (stop_)
+        {
+            return false;
+        }
+
+        queue_.push(std::move(task));
+    }
+
+    // 在释放锁后唤醒一个等待的工作线程。
+    cv_.notify_one();
+    return true;
+}
+
+
 Task TaskQueue::pop() 
 {
     std::unique_lock<std::mutex> lock(mtx_);

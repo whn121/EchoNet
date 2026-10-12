@@ -46,3 +46,24 @@ target_link_libraries(EchoNet PRIVATE echonet_core)
 # ═══════ EchoNetGateway 可执行文件 ═══════
 add_executable(EchoNetGateway src/gateway_main.cpp)
 target_link_libraries(EchoNetGateway PRIVATE echonet_core)
+
+# ===== HUP 完整请求回归测试 =====
+option(ECHONET_BUILD_REGRESSION_TESTS
+       "Build EchoNet regression tests" OFF)
+
+if(ECHONET_BUILD_REGRESSION_TESTS)
+    enable_testing()
+
+    add_executable(EchoNetFullCloseBufferedRequest
+        text/text_fullclose_buffered_request.cpp
+    )
+
+    target_link_libraries(EchoNetFullCloseBufferedRequest
+        PRIVATE echonet_core
+    )
+
+    add_test(
+        NAME echonet_fullclose_buffered_request
+        COMMAND EchoNetFullCloseBufferedRequest
+    )
+endif()

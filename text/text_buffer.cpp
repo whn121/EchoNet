@@ -32,7 +32,7 @@ int main()
     {
         Buffer buf;
         buf.bufferAppend("hello", 5);
-        buf.goReadPtr(3);
+        buf.moveReadPtr(3);
         assert(buf.getreadable() == 2);
         assert(memcmp(buf.peek(), "lo", 2) == 0);
     }
@@ -41,7 +41,7 @@ int main()
     {
         Buffer buf;
         buf.bufferAppend("hello", 5);
-        buf.goReadPtr(5);
+        buf.moveReadPtr(5);
         buf.bufferAppend("world", 5);
         assert(buf.getreadable() == 5);
         assert(memcmp(buf.peek(), "world", 5) == 0);

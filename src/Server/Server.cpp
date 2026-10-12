@@ -8,7 +8,10 @@ Server::Server()
     : iopool_(Config::instance().io_threads),
     workpool_(Config::instance().work_threads) {}
 
-Server::~Server() = default;
+Server::~Server()
+{
+    stop();
+}
 
 bool Server::start() 
 {
@@ -49,12 +52,50 @@ bool Server::start()
     return true;
 }
 
-void Server::stop() 
+
+
+void Server::stop()
 {
+    bool expected = false;
+
+    // 整个停服流程只允许一个调用者执行。
+    if (!stopStarted_.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    {
+        return;
+    }
+
+    // 1. 确保主事件循环停止。
+    // 当前正常调用路径是 start() 已经返回。
     mainloop_.stop();
-    iopool_.stop();
+
+    // 2. 注销监听Channel, 再注销Acceptor
+    if (acceptor_)
+    {
+        acceptor_->stop();
+        acceptor_.reset();
+    }
+
+    // 3. 释放监听socket
+    listen_socket_.close();
+
+    // 4. 在io循环运行时, 让现有连接进入关闭流程
+    LOG_INFO("Server stopping: closing all connections");
+    iopool_.closeAllConnections();
+
+    // 5. 停止并等待业务线程池
     workpool_.stop();
+
+    // 6. 等待业务任务产生的io收尾回调完成
+    LOG_INFO("Server stopping: draining I/O callbacks");
+    iopool_.waitForPendingCallbacks();
+
+    // 7. 最后停止并join io 线程池
+    iopool_.stop();
+
+    LOG_INFO("Server stopped");
 }
+
+
 
 void Server::setcreator (std::function<std::shared_ptr<Connection> (int afd, EventLoop* loop)> creator)
 {

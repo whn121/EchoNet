@@ -19,6 +19,21 @@ void Acceptor::listen()
     loop_->updateChannel(channel_.get(), EPOLLIN);           // 注册到 epoll，监听读事件
 }
 
+void Acceptor::stop()
+{
+    if (!channel_)
+    {
+        return;
+    }
+
+    // 必须在所属Eventloop线程中注销Channel
+    loop_->assertInLoopThread();
+    loop_->removeChannel(channel_.get());
+
+    // 注销成功或失败后, 都不再让Acceptor持有Channel
+    channel_.reset();
+}
+
 // 设置新连接到来时的外部回调（用于将新连接分发给 IO 线程池）
 void Acceptor::setCallBack(std::function<void(int)> cb) 
 {
@@ -26,7 +41,7 @@ void Acceptor::setCallBack(std::function<void(int)> cb)
 }
 
 // 处理新连接：accept 获得 fd，设为非阻塞，然后通过回调分发
-//要循环acppet知道EAGAIN
+// 要循环acppet知道EAGAIN
 void Acceptor::handleAccept() 
 {
     sockaddr_in addr{};                    // 客户端地址结构

@@ -7,7 +7,7 @@
 #include <memory>
 #include "Reactor/EventLoop.h"
 #include "ThreadPool/Task.h"
-#include "Protocol/Protocol.h"      // 只依赖抽象协议，不依赖 HTTP
+#include "Protocol/Protocol.h"      // 只依赖抽象协议, 不依赖 HTTP
 #include <mutex>
 #include <chrono>
 #include <queue>
@@ -15,7 +15,7 @@
 
 
 
-// 表示一个 TCP 连接，管理读写缓冲区、协议解析、回调投递
+// 表示一个 TCP 连接, 管理读写缓冲区、协议解析、回调投递
 class Connection : public std::enable_shared_from_this<Connection> 
 {
 public:
@@ -33,15 +33,15 @@ public:
     void myClose();                                       // 主动关闭连接
     void init();                                          // 初始化回调绑定
     void setCallBack(std::function<void(Task)>);          // 设置业务处理回调
-    void close();// 线程安全的关闭方法，可以从任意线程调用
+    void close();// 线程安全的关闭方法, 可以从任意线程调用
 
     // 将任务加入当前连接的 FIFO 队列 FIFO(按照到达先后顺序执行)
     void enqueueTask(Task task);
 
-    // 当前任务执行完成后，继续调度下一个任务
+    // 当前任务执行完成后, 继续调度下一个任务
     void onTaskComplete();
 
-    // 业务处理回调：接收连接和解析后的消息，由 Server 层注入
+    // 业务处理回调：接收连接和解析后的消息, 由 Server 层注入
     // 解决work知道协议,解耦不彻底的问题
     using BusinessHandler = std::function<void(std::shared_ptr<Connection>, const std::any&)>;
 
@@ -76,21 +76,30 @@ private:
     //防止重复关闭
     enum class State
     {
-        Connected,  // 正常工作，可以进行 IO
-        Closing,    // 已经开始关闭，不再接受新的 IO
+        Connected,  // 正常工作, 可以进行 IO
+        Closing,    // 已经开始关闭, 不再接受新的 IO
         Closed      // 关闭流程已经完成
     };
 
     std::atomic<State> state_ {State::Connected};
+
+    // 对端已经关闭发送方向, 但本端可能仍需处理已收到的请求并发送响应。
+    // 该变量只由所属 EventLoop 线程读写。
+    bool peerReadClosed_ = false;
+
+    // 已投递但尚未执行的发送回调数量。配合上面,防止任务刚投递到eventloop就关闭,然后看task没任务直接退出
+    std::atomic<size_t> pendingSendCallbacks_{0};
     
     void handleClose();      // 统一关闭入口 ,进入关闭状态,禁止新的io操作,移除epoll监听
+
+    void maybeFinishAfterPeerEof(); // 专门负责判断 对端发送方向关闭后, 业务任务是否完成,待执行发送回调是否归零, 以及响应缓冲是否排空,都满足进入关闭流程
 
     BusinessHandler businessHandler_;  //  解决work知道协议,解耦不彻底的问题 是一个函数指针 
 
     // 活跃检测,超时踢人 减少一个额外线程的开销
     std::chrono::steady_clock::time_point last_active_{std::chrono::steady_clock::now()};
 
-    // 当前连接等待执行的任务，严格 FIFO
+    // 当前连接等待执行的任务, 严格 FIFO
     std::queue<Task> pendingTasks_;
 
     // 保护 pendingTasks_ 和 taskRunning_
@@ -99,11 +108,15 @@ private:
     // true：当前已经有一个任务被送到 Worker 执行
     bool taskRunning_ = false;
 
+    // 终止关闭已请求，但仍有业务任务执行。
+    // 由 taskMutex_ 保护。
+    bool closeCallbackPending_ = false;
+
     // 异步发送队列
     std::mutex sendMutex_;
 
     std::queue<std::string> sendQueue_;
    
-    // 写缓冲高水位：超过就断开连接，防止客户端只读不写把服务器内存吃光
+    // 写缓冲高水位：超过就断开连接, 防止客户端只读不写把服务器内存吃光
     static constexpr size_t HIGH_WATER_MARK = 64 * 1024 * 1024;  // 64MB
 };

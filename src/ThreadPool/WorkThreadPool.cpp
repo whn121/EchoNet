@@ -5,16 +5,42 @@
 
 WorkThreadPool::WorkThreadPool(int num) : num_(num > 0 ? num : 4) 
 {
-    for (int i = 0; i < num; ++i)
+    for (int i = 0; i < num_; ++i)
     threads_.emplace_back([this] { worker(); });
 }
 
 WorkThreadPool::~WorkThreadPool() { stop(); }
 
-void WorkThreadPool::submit(Task task) 
+
+void WorkThreadPool::submit(Task task)
 {
-    queue_.push(std::move(task));
+    // 队列停止后，tryPush 返回 false。
+    // 按接口约定，此时 task 尚未被移动，可以继续访问它的回调。
+    if (!queue_.tryPush(std::move(task)))
+    {
+        LOG_WARN("WorkThreadPool: rejected task because the queue is stopped");
+
+        // 任务没有执行，也必须通知 Connection 收尾，
+        // 否则 taskRunning_ 可能一直保持 true，连接无法完成关闭。
+        if (task.onComplete_)
+        {
+            try
+            {
+                task.onComplete_();
+            }
+            catch (const std::exception& e)
+            {
+                LOG_ERROR("WorkThreadPool: rejected task completion threw: "
+                          + std::string(e.what()));
+            }
+            catch (...)
+            {
+                LOG_ERROR("WorkThreadPool: rejected task completion threw unknown exception");
+            }
+        }
+    }
 }
+
 
 void WorkThreadPool::worker() 
 {

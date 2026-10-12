@@ -8,7 +8,11 @@
 class TaskQueue 
 {
 public:
+    // 队列停止后拒绝新的任务: 返回false时不移动task
     void push(Task task);
+    // 尝试提交任务。
+    // 队列停止后返回 false，且不移动 task，调用方可以处理被拒绝的任务。
+    bool tryPush(Task&& task);
     Task pop();                 // 阻塞直到有任务或停止
     void stop();                // 唤醒所有等待并停止
 private:

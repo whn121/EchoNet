@@ -27,6 +27,7 @@ public:
     void setReuseAddr(bool on);                         // 设置地址重用
     void setNonBlocking();                              // 设置非阻塞
     int getFd() const { return fd_; };                  // 获取文件描述符
+    void close(); // 主动关闭 socket；重复调用安全
 
     // 提供主动链接,网关要服务器主动连接诶
     bool m_connect(const std::string& host, uint16_t port);   // 主动连接

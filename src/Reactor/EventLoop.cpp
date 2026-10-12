@@ -29,7 +29,27 @@ EventLoop::~EventLoop()
     // 所以必须在关闭 efd_ 之前执行。
     if (timerChannel_)
     {
-        removeChannel(timerChannel_.get());
+        // 只有在Eventloop所属线程中, 才调用带线程断言的接口
+        if (isInLoopThread())
+        {
+            removeChannel(timerChannel_.get());
+        }
+        else
+        {
+            // 这里仅允许再Eventloop已经停止且所属线程已经退出后执行
+            // 此时不会再有其他线程访问channels_
+            if (efd_ != -1 && timerfd_ != -1)
+            {
+                if (::epoll_ctl(efd_, EPOLL_CTL_DEL, timerfd_, nullptr) < 0 && errno != ENOENT && errno != EBADF)
+                {
+                    LOG_WARN("EventLoop destructor: timerfd epoll DEL failed: " + std::string(strerror(errno)));
+                }
+            }
+
+            timerChannel_->setEvents(0);
+            channels_.erase(timerChannel_->getFd());
+        }
+
         timerChannel_.reset();
     }
 
@@ -56,15 +76,21 @@ EventLoop::~EventLoop()
     }
 }
 
-void EventLoop::loop() 
+void EventLoop::loop()
 {
     owner_thread_id_ = std::this_thread::get_id();   // 记录实际运行 loop 的线程
-    
+
+    {
+        std::lock_guard<std::mutex> lock(start_mtx_);
+        started_ = true;
+    }
+    start_cv_.notify_all();
+
     // 上一轮待销毁的连接，放在这里析构
     // 避免 pendingConnections_.clear() 一次性析构所有 shared_ptr 造成 IO 线程卡顿
     std::vector<std::shared_ptr<Connection>> garbage;
 
-    while (!stop_) 
+    while (!stop_)
     {
         // 上一轮的 garbage 在这里析构
         garbage.clear();
@@ -83,16 +109,16 @@ void EventLoop::loop()
 
         // 关键：如果事件数达到上限，下次扩容
         // 防止 events_ 固定 1024 导致高并发时每次唤醒只处理 1024 个事件
-        if (static_cast<size_t>(n) == events_.size() && events_.size() < 65536) 
+        if (static_cast<size_t>(n) == events_.size() && events_.size() < 65536)
         {
             events_.resize(events_.size() * 2);
             LOG_INFO("EventLoop events_ resized to " + std::to_string(events_.size()));
         }
 
-        for (int i = 0; i < n; ++i) 
+        for (int i = 0; i < n; ++i)
         {
             int fd = events_[i].data.fd;
-            if (fd == wakeup_fd_) 
+            if (fd == wakeup_fd_)
             {
                 // 唤醒事件：读出数据清空计数器，然后执行投递的任务
                 uint64_t dummy;
@@ -104,10 +130,10 @@ void EventLoop::loop()
                 }
                 for (auto& task : tasks) task();
             }
-            else 
+            else
             {
                 auto it = channels_.find(fd);
-                if (it != channels_.end()) 
+                if (it != channels_.end())
                 {
                     it->second->setRevents(events_[i].events);
                     it->second->handleEvent(events_[i].events); // 执行回调
@@ -120,9 +146,9 @@ void EventLoop::loop()
     }
 }
 
-void EventLoop::runInLoop(std::function<void()> cb) 
+void EventLoop::runInLoop(std::function<void()> cb)
 {
-    if (isInLoopThread()) 
+    if (isInLoopThread())
     {
         cb();   // 直接执行
     }
@@ -136,25 +162,32 @@ void EventLoop::runInLoop(std::function<void()> cb)
     }
 }
 
-void EventLoop::wakeUp() 
+void EventLoop::wakeUp()
 {
     uint64_t one = 1;
     write(wakeup_fd_, &one, sizeof(one));
 }
 
-void EventLoop::stop() 
+void EventLoop::stop()
 {
     stop_ = true;
     wakeUp();  // 唤醒，让循环退出
 }
 
-void EventLoop::updateChannel(Channel* ch, uint32_t events) 
+void EventLoop::updateChannel(Channel* ch, uint32_t events)
 {
     assertInLoopThread();
 
     epoll_event ev{};
     // 始终监听 EPOLLRDHUP，对端关闭写端时能感知
-    ev.events = events | EPOLLRDHUP;
+    // 改了不是始终了为了添加半关闭继续解析,配合read()读到EOF不再关闭连接,不改就一直收到EPOLLRDHUP
+    ev.events = events;
+
+    if (events & EPOLLIN)
+    {
+        ev.events |= EPOLLRDHUP;
+    }
+
     ev.data.fd = ch->getFd();
 
     int ret = epoll_ctl(efd_, EPOLL_CTL_ADD, ch->getFd(), &ev);
@@ -171,7 +204,7 @@ void EventLoop::updateChannel(Channel* ch, uint32_t events)
     channels_[ch->getFd()] = ch;
 }
 
-void EventLoop::removeChannel(Channel* ch) 
+void EventLoop::removeChannel(Channel* ch)
 {
     assertInLoopThread();   // 确保在所属线程
 
@@ -188,60 +221,108 @@ void EventLoop::removeChannel(Channel* ch)
     channels_.erase(ch->getFd());
 }
 
-void EventLoop::updateConnection(std::shared_ptr<Connection> conn) 
+void EventLoop::updateConnection(std::shared_ptr<Connection> conn)
 {
     assertInLoopThread();   // 确保在所属线程
 
     connections_[conn->getChannel()->getFd()] = conn;
 }
 
-void EventLoop::removeConnection(int fd) 
+void EventLoop::removeConnection(int fd)
 {
     assertInLoopThread();   // 确保在所属线程
 
-    auto it = channels_.find (fd);
-    if (it != channels_.end ())
+    // channel如果仍在channels_中, 说明他尚未被提前移除
+    // 只有这种情况下才执行EPOLL_CTL_DEL
+    auto channelIt = channels_.find (fd);
+
+    if (channelIt != channels_.end ())
     {
-        it -> second -> setEvents (0);
+        Channel* channel = channelIt->second;
+        channel->setEvents(0);
+
+        int ret = epoll_ctl(efd_, EPOLL_CTL_DEL, fd, nullptr);
+        if (ret < 0)
+        {
+            int saved_errno = errno;
+            LOG_ERROR("epoll_ctl DEL failed, fd=" + std::to_string(fd) + " errno=" + std::to_string(saved_errno)
+                + " (" + std::string(strerror(saved_errno)) + ")");
+
+        }
+
+        channels_.erase(channelIt);
     }
 
-    int ret = epoll_ctl(efd_, EPOLL_CTL_DEL, fd, nullptr);
-    if (ret < 0)
-    {
-        int saved_errno = errno;
-        std::string log_str = "epoll_ctl DEL failed, fd=" + std::to_string(fd)
-        + " errno=" + std::to_string(saved_errno)
-        + " (" + std::string(strerror(saved_errno)) + ")";
-        LOG_ERROR(log_str);
-    }
-    channels_.erase(fd);
-    //移除 Connection 映射，但暂存 shared_ptr，延迟析构
-    auto connit = connections_.find (fd);
-    if (connit != connections_.end())
-    {
-        auto conn = connit->second;
+    // 即使channel已经提前移除, 也不能漏掉Connection的最终清理
+    // 移除 Connection 映射，但暂存 shared_ptr，延迟析构
+    auto connIt = connections_.find (fd);
 
+    if (connIt != connections_.end())
+    {
+        auto conn = connIt->second;
+
+        // 真正关闭socket, 并将connection暂存到点前循环周期的末尾
         conn->finishClose();
-
+        // 延迟析构, 避免事件回调执行期间销毁connection
         pendingConnections_.push_back(conn);
 
-        connections_.erase(connit);
+        connections_.erase(connIt);
     }
 }
 
-void EventLoop::updateChannelEvent(Channel* ch, uint32_t events) 
+
+void EventLoop::closeAllConnections(std::function<void()> done)
+{
+    // 所有连接的关闭操作都必须在所属 EventLoop 线程执行。
+    runInLoop([this, done = std::move(done)]() mutable
+    {
+        // 先保存快照：conn->close() 可能同步触发 removeConnection()，
+        // 从而修改 connections_，因此不能在遍历原 map 时直接关闭。
+        std::vector<std::shared_ptr<Connection>> snapshot;
+        snapshot.reserve(connections_.size());
+
+        for (const auto& [fd, conn] : connections_)
+        {
+            if (conn)
+            {
+                snapshot.push_back(conn);
+            }
+        }
+
+        // 逐个发起关闭。
+        // 若连接还有正在执行的业务任务，最终关闭会延迟到任务完成后。
+        for (const auto& conn : snapshot)
+        {
+            conn->close();
+        }
+
+        // 这里只表示本轮关闭请求已发起，不代表所有 fd 已关闭。
+        if (done)
+        {
+            done();
+        }
+    });
+}
+
+void EventLoop::updateChannelEvent(Channel* ch, uint32_t events)
 {
     assertInLoopThread();
 
     //这个优化有bug
     // 事件没变 → 跳过 epoll_ctl，减少系统调用
-    //if (ch->getEvents() == events) 
+    //if (ch->getEvents() == events)
     //{
     //    return;
     //}
 
     epoll_event ev{};
-    ev.events = events | EPOLLRDHUP;
+    ev.events = events;
+
+    if (events & EPOLLIN)
+    {
+        ev.events |= EPOLLRDHUP;
+    }
+
     ev.data.fd = ch->getFd();
 
     int ret = epoll_ctl(efd_, EPOLL_CTL_MOD, ch->getFd(), &ev);
@@ -257,9 +338,9 @@ void EventLoop::updateChannelEvent(Channel* ch, uint32_t events)
     ch->setEvents(events);
 }
 
-void EventLoop::assertInLoopThread() const 
+void EventLoop::assertInLoopThread() const
 {
-    if (std::this_thread::get_id() != owner_thread_id_) 
+    if (std::this_thread::get_id() != owner_thread_id_)
     {
         LOG_ERROR("EventLoop method called from wrong thread!");
         abort();   // 直接终止，因为继续执行会导致数据竞争
@@ -275,7 +356,7 @@ void EventLoop::setTimer(int interval_sec, std::function<void()> cb)
     if (timerfd_ < 0)
     {
         LOG_ERROR("timerfd_create failed: " + std::string(strerror(errno)));
-        return; 
+        return;
     }
 
     //设置周期：首次 interval_sec 后触发，之后每 interval_sec 触发一次
@@ -322,30 +403,30 @@ void EventLoop::handleTimer()
 void EventLoop::checkIdleConnections(int timeout_sec)
 {
     assertInLoopThread();   // 只在所属线程执行
-    
+
     std::vector<int> timeout_fds;
     timeout_fds.reserve(16);
-    
-    for (const auto& [fd, conn] : connections_) 
+
+    for (const auto& [fd, conn] : connections_)
     {
-        if (conn->idleSeconds() > timeout_sec) 
+        if (conn->idleSeconds() > timeout_sec)
         {
             timeout_fds.push_back(fd);
         }
     }
-    
+
     if (timeout_fds.empty()) return;
-    
-    LOG_INFO("Timeout scan: " + std::to_string(timeout_fds.size()) 
-             + " connections idle for more than " 
+
+    LOG_INFO("Timeout scan: " + std::to_string(timeout_fds.size())
+             + " connections idle for more than "
              + std::to_string(timeout_sec) + "s");
-    
+
     for (int fd : timeout_fds)
     {
         // 关键：不能直接 erase，要走统一关闭流程
         auto it = connections_.find(fd);
         if (it == connections_.end()) continue;
-        
+
         auto conn = it->second;
         // handleClose 是幂等的，内部会触发 closeCallback
         // closeCallback 里会调 onConnectionClosed + removeConnection
@@ -353,7 +434,16 @@ void EventLoop::checkIdleConnections(int timeout_sec)
     }
 }
 
-bool EventLoop::isInLoopThread() const 
+void EventLoop::waitUntilStarted()
+{
+    std::unique_lock<std::mutex> lock(start_mtx_);
+    start_cv_.wait(lock, [this]
+    {
+        return started_;
+    });
+}
+
+bool EventLoop::isInLoopThread() const
 {
     return std::this_thread::get_id() == owner_thread_id_;
 }

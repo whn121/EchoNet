@@ -12,6 +12,7 @@ class Acceptor
 public:
     Acceptor(int fd, EventLoop* loop, IoThreadPool* pool);
     void listen();
+    void stop();
     void setCallBack(std::function<void(int)> cb);
 private:
     int fd_;

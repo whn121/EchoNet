@@ -6,6 +6,8 @@
 #include "Net/Socket.h"
 #include <memory>
 #include <functional>
+#include <atomic>
+
 
 // 服务器主类，组装所有组件
 class Server 
@@ -32,4 +34,6 @@ private:
     std::function<std::shared_ptr<Connection> (int afd, EventLoop* loop)> creator_;
     IoThreadPool::BusinessHandler businessHandler_;
     std::function<void(int)> closeCallback_;
+    // 防止 Server::stop() 被重复执行
+    std::atomic<bool> stopStarted_{false};
 };
